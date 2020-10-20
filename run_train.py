@@ -1127,6 +1127,42 @@ def create_y_transform_tensor(data, cfg):
     return y, transform_matrix, centroid, ego_center
 
 
+def create_y_transform_tensor_new_l5kit(data, cfg):
+
+    # In new world, target_positions are img coordinates and are given in metres. Convert to pixels for equivalence with old version of l5kit
+    y_pos_transform = torch.Tensor(data['target_positions'] * cfg['raster_params']['pixel_size'][0]).float() 
+    yaws = torch.Tensor(data['target_yaws']).float()
+    y_avail = torch.Tensor(data['target_availabilities'].reshape(-1, 1)).float()
+
+    transform_matrix = torch.Tensor(data['world_to_image']).float()
+    centroid = torch.Tensor(data['centroid'][None, :]).float()
+
+    if 'ego_center' in data:
+        ego_center = torch.Tensor(data['ego_center'][None, :]).float()
+    else:
+        ego_center = torch.Tensor(np.array(cfg['raster_params']['ego_center'])[None, :]).float()
+
+    # Calculate y in world coordinates in metres
+    y_pos = reverse_transform_y(y_pos_transform.clone().unsqueeze(0).unsqueeze(0), 
+                                centroid.unsqueeze(0), 
+                                transform_matrix.unsqueeze(0), 
+                                cfg['raster_params']['raster_size'], ego_center.unsqueeze(0), 1)
+
+    ## CHECKS ##
+    if False:
+        # l5kit world coordinates in metres
+        world_positions = transform_points(data["target_positions"], data["world_from_image"]) - centroid[:2]
+        np.allclose(world_positions, y_pos.numpy(), atol=0.001)
+
+        y_pos_reverse =transform_y(y_pos.clone(), centroid, transform_matrix, cfg['raster_params']['raster_size'], ego_center, 1)
+
+        np.allclose(y_pos_transform.numpy(), y_pos_reverse.numpy() * cfg['raster_params']['pixel_size'][0], atol=0.001)
+    
+    y = torch.cat([y_pos, yaws, y_pos_transform, yaws, y_avail], dim=1)
+
+    return y, transform_matrix, centroid, ego_center
+
+
 def transform_y(y_pos, centroid, transform_matrix, raster_size, ego_center):
 
     is_3d = y_pos.ndim == 3
@@ -1148,7 +1184,6 @@ def transform_y(y_pos, centroid, transform_matrix, raster_size, ego_center):
     y_pos = torch.matmul(transform_matrix, y_pos.transpose(1, 2))
     y_pos = y_pos.transpose(1, 2)[:, :, :2]
         
-    #bias = torch.tensor([raster_size[0] * ego_center[0], raster_size[1] * ego_center[1]])[None, None, :].to(device)
     bias = torch.cat([raster_size[0]*ego_center[:, :, 0], raster_size[1]*ego_center[:, :, 1]], dim=-1)[None, :].to(device)
     y_pos = y_pos - bias
 
@@ -1167,7 +1202,6 @@ def reverse_transform_y(pred, centroid, transform_matrix, raster_size, ego_cente
 
     transform_matrix_inv = torch.inverse(transform_matrix).to(device)
 
-    #bias = torch.tensor([raster_size[0] * ego_center[0], raster_size[1] * ego_center[1]])[None, None, None, :].to(device)
     bias = torch.cat([raster_size[0]*ego_center[:, :, 0], raster_size[1]*ego_center[:, :, 1]], dim=-1)[:, None, None, :].to(device)
 
     pred = pred + bias
