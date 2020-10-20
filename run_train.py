@@ -41,7 +41,7 @@ from l5kit.data.filter import filter_tl_faces_by_status, get_frames_slice_from_s
 from l5kit.data.map_api import MapAPI
 from l5kit.dataset import AgentDataset, EgoDataset
 from l5kit.kinematic import Perturbation
-from l5kit.rasterization.rasterizer_builder import build_rasterizer, _load_metadata
+from l5kit.rasterization.rasterizer_builder import build_rasterizer, _load_metadata, get_hardcoded_world_to_ecef
 from l5kit.rasterization.sem_box_rasterizer import SemBoxRasterizer
 from l5kit.rasterization.box_rasterizer import BoxRasterizer
 from l5kit.rasterization.rasterizer import Rasterizer, EGO_EXTENT_HEIGHT, EGO_EXTENT_LENGTH, EGO_EXTENT_WIDTH
@@ -1727,9 +1727,9 @@ def fit_multitrain_motion_predict(n_epochs, train_args_dict, val_args_dict,
                         model_checkpoint_path=None, lr=3e-4,
                         start_epoch=0, 
                         fit_fn='fit', val_fn='evaluate', 
-                        clsModel=LyftResnet18,
-                        loss_fn=filtered_mse, 
-                        loader_fn=agents_ego_map,
+                        clsModel=LyftResnet18Transform,
+                        loss_fn=neg_log_likelihood_transform,
+                        loader_fn=double_channel_agents_ego_map_transform,
                         str_train_loaders=['train_data_loader_100', 'train_data_loader_30'],
                         cfg_fn=create_config,
                         rasterizer_fn=build_rasterizer,
@@ -1932,7 +1932,7 @@ def run_tests_multi_motion_predict(model_str='', str_network='resnet18',
                             sample_history_num_frames=10, history_num_frames=10, future_num_frames=50, n_modes=3, max_agents=40, group_scenes=False,
                             fit_fn='fit_transform', val_fn='test_transform', aug='none', 
                             clsTrainDataset=MotionPredictChoppedDataset, clsValDataset=MotionPredictChoppedDataset,
-                            clsModel=LyftResnet18, init_model_weights_path=None, cfg_model_params=None,
+                            clsModel=LyftResnet18Transform, init_model_weights_path=None, cfg_model_params=None,
                             rasterizer_fn=build_rasterizer,
                             loss_fn=neg_log_likelihood_transform, 
                             str_train_loaders=['train_data_loader_100', 'train_data_loader_30'],
@@ -1987,7 +1987,7 @@ def run_forecast_multi_motion_predict(model_str='', str_network='resnet18',
                                     clsTrainDataset=MotionPredictChoppedDataset, 
                                     clsValDataset=MotionPredictChoppedDataset,
                                     clsTestDataset=MotionPredictDataset,
-                                    clsModel=LyftResnet18,
+                                    clsModel=LyftResnet18Transform,
                                     init_model_weights_path=None,
                                     rasterizer_fn=build_rasterizer,
                                     loss_fn=neg_log_likelihood_transform, 
@@ -2034,25 +2034,40 @@ def run_forecast_multi_motion_predict(model_str='', str_network='resnet18',
 
 if __name__ == '__main__':
 
-    print('FIXED MULTI DATASET, NO AUG, 3 x train_data_loader')
-    run_tests_multi_motion_predict(n_epochs=800, in_size=128, batch_size=256, samples_per_epoch=17000//3, # Divide by 3 as MultiMotionPredictChoppedDataset sums component samples within each epoch
-                             sample_history_num_frames=5, history_num_frames=5, future_num_frames=50, group_scenes=False,
-                             clsTrainDataset=MultiMotionPredictChoppedDataset, clsValDataset=MotionPredictChoppedDataset,
-                             clsModel=LyftResnet18Transform,
-                             fit_fn='fit_fastai_transform', val_fn='test_transform', loss_fn=neg_log_likelihood_transform,
-                             aug='none',
-                             loader_fn=double_channel_agents_ego_map_transform,
-                             cfg_fn=create_config_multi_train_chopped,
-                             str_train_loaders=['train_data_loader_10', 'train_data_loader_90', 'train_data_loader_180'],
-                             rasterizer_fn=build_rasterizer)
+    print('FIXED MULTI DATASET, NO AUG, 10 x train_data_loader')
+    run_tests_multi_motion_predict(n_epochs=1000, in_size=320, batch_size=256, samples_per_epoch=17000 // 10,
+                                   sample_history_num_frames=10, history_num_frames=10, future_num_frames=50,
+                                   group_scenes=False,
+                                   clsTrainDataset=MultiMotionPredictChoppedDataset,
+                                   clsValDataset=MotionPredictChoppedDataset,
+                                   clsModel=LyftResnet18Transform,
+                                   fit_fn='fit_fastai_transform', val_fn='test_transform',
+                                   loss_fn=neg_log_likelihood_transform,
+                                   aug='none',
+                                   loader_fn=double_channel_agents_ego_map_transform,
+                                   cfg_fn=create_config_multi_train_chopped,
+                                   str_train_loaders=['train_data_loader_10', 'train_data_loader_30',
+                                                      'train_data_loader_50', 'train_data_loader_70',
+                                                      'train_data_loader_90', 'train_data_loader_110',
+                                                      'train_data_loader_130', 'train_data_loader_150',
+                                                      'train_data_loader_180', 'train_data_loader_200'],
+                                   rasterizer_fn=build_rasterizer)
 
-    run_forecast_multi_motion_predict(n_epochs=800, in_size=128, batch_size=256, samples_per_epoch=17000//3,
-                                    sample_history_num_frames=5, history_num_frames=5, future_num_frames=50, group_scenes=False,
-                                    clsTrainDataset=MultiMotionPredictChoppedDataset, clsValDataset=MotionPredictChoppedDataset,
-                                    clsModel=LyftResnet18Transform,
-                                    fit_fn='fit_fastai_transform', val_fn='test_transform', loss_fn=neg_log_likelihood_transform,
-                                    aug='none',
-                                    loader_fn=double_channel_agents_ego_map_transform,
-                                    cfg_fn=create_config_multi_train_chopped,
-                                    str_train_loaders=['train_data_loader_10', 'train_data_loader_90', 'train_data_loader_180'],
-                                    rasterizer_fn=build_rasterizer)
+    run_forecast_multi_motion_predict(n_epochs=1000, in_size=320, batch_size=256, samples_per_epoch=17000 // 10,
+                                      sample_history_num_frames=10, history_num_frames=10, future_num_frames=50,
+                                      group_scenes=False,
+                                      clsTrainDataset=MultiMotionPredictChoppedDataset,
+                                      clsValDataset=MotionPredictChoppedDataset,
+                                      clsModel=LyftResnet18Transform,
+                                      fit_fn='fit_fastai_transform', val_fn='test_transform',
+                                      loss_fn=neg_log_likelihood_transform,
+                                      aug='none',
+                                      loader_fn=double_channel_agents_ego_map_transform,
+                                      cfg_fn=create_config_multi_train_chopped,
+                                      str_train_loaders=['train_data_loader_10', 'train_data_loader_30',
+                                                         'train_data_loader_50', 'train_data_loader_70',
+                                                         'train_data_loader_90', 'train_data_loader_110',
+                                                         'train_data_loader_130', 'train_data_loader_150',
+                                                         'train_data_loader_180', 'train_data_loader_200'],
+                                      rasterizer_fn=build_rasterizer)
+
