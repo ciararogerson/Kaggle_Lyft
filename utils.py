@@ -2,6 +2,7 @@
 import pickle
 import os
 import numpy as np
+from timeit import default_timer as timer
 
 
 ##############################################
