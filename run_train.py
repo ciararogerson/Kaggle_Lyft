@@ -270,7 +270,9 @@ class AgentDatasetCF(AgentDataset):
             "history_positions": history_positions,
             "history_yaws": history_yaws,
             "history_availabilities": data["history_availabilities"],
+            "world_to_image": data["world_to_image"],
             "raster_from_world": data["raster_from_world"],
+            "raster_from_agent": data["raster_from_agent"],
             "world_from_agent": data["world_from_agent"],
             "agent_from_world": data["agent_from_world"],
             "track_id": track_id,
@@ -1089,12 +1091,14 @@ def generate_history_idx(n, history_num_frames, shuffle=False):
 
 def create_y_transform_tensor(data, cfg):
 
-    # In new version, target_positions are raster coordinates and are given in metres.
-    y_pos_transform = torch.Tensor(data['target_positions']).float() 
+    # Target_positions are in world coordinates in metres
+    
+    y_pos = torch.Tensor(data['target_positions']).float() 
     yaws = torch.Tensor(data['target_yaws']).float()
     y_avail = torch.Tensor(data['target_availabilities'].reshape(-1, 1)).float()
 
-    world_from_agent = torch.Tensor(data['world_from_agent']).float()
+    world_to_image = torch.Tensor(data['world_to_image']).float()
+    world_from_image = torch.inverse(world_to_image)
     centroid = torch.Tensor(data['centroid'][None, :]).float()
 
     if 'ego_center' in data:
@@ -1102,29 +1106,47 @@ def create_y_transform_tensor(data, cfg):
     else:
         ego_center = torch.Tensor(np.array(cfg['raster_params']['ego_center'])[None, :]).float()
 
-    # Calculate y in world coordinates in metres
-    y_pos = reverse_transform_y(y_pos_transform.clone().unsqueeze(0).unsqueeze(0), 
-                                centroid.unsqueeze(0), 
-                                world_from_agent.unsqueeze(0), 1)
+    # y_pos_transform = y in raster coordinates
+    y_pos_transform = transform_points(y_pos.clone() + centroid[:2], world_to_image)
+
+
+    # CHECKS:
+    if False:
+        # If we go from y_pos_transform -> y_pos do we get back to the original correctly?
+        # (Checking for use of reverse_transform_y later...)
+        y_pos_test = reverse_transform_y(y_pos_transform.clone().unsqueeze(0), 
+                                        centroid, 
+                                        world_from_image, 1).squeeze(0) # Single mode
+        np.allclose(y_pos_test.numpy(), y_pos, atol=0.001)
     
     y = torch.cat([y_pos, yaws, y_pos_transform, yaws, y_avail], dim=1)
 
-    return y, world_from_agent, centroid, ego_center
+    return y, world_from_image, centroid, ego_center
 
 
-def reverse_transform_y(pred, centroid, world_from_agent, n_modes):
+def reverse_transform_y(y, centroid, world_from_image, n_modes):
 
-    device = pred.device
+    device = y.device
 
-    batch_size = pred.shape[0]
+    is_4d = y.ndim == 4
+
+    if not is_4d:
+        y = y[None, :, :, :]
+        centroid = centroid[None, :, :]
+        world_from_image = world_from_image[None, :, :]
+
+    batch_size = y.shape[0]
 
     for i in range(batch_size):
         for m in range(n_modes):
-            pred[i, m, :, :] = transform_points(pred[i, m, :, :], world_from_agent[i])
+            y[i, m, :, :] = transform_points(y[i, m, :, :], world_from_image[i])
     
-    pred = pred - centroid[:, None, :, :].to(device)
+    y = y - centroid[:, None, :, :].to(device)
 
-    return pred
+    if not is_4d:
+        y = y.squeeze(0)
+
+    return y
 
 
 def numpy_to_torch(img):
@@ -1605,7 +1627,7 @@ class LyftResnet18Transform(LyftResnet18Small):
     def forward(self, *_x):
 
         x = _x[0]
-        transform_matrix = _x[1]
+        world_from_raster = _x[1]
         centroid = _x[2]
         ego_center = _x[3]
 
@@ -1621,7 +1643,7 @@ class LyftResnet18Transform(LyftResnet18Small):
         # but we also append original coordinates by calling reverse_transform_y() on the predictions.
         x_confs = x[:, :n_modes]
         x_transform = x[:, n_modes:].reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :, :2].float()
-        x_orig = reverse_transform_y(x_transform.clone(), centroid.float(), transform_matrix.float(), n_modes)
+        x_orig = reverse_transform_y(x_transform.clone(), centroid.float(), world_from_raster.float(), n_modes)
  
         yaws = torch.ones((batch_size, n_modes, future_num_frames, 1)).to(DEVICE)
 
@@ -1982,8 +2004,8 @@ def run_forecast_multi_motion_predict(model_str='', str_network='resnet18',
 if __name__ == '__main__':
 
     print('FIXED MULTI DATASET, NO AUG, 10 x train_data_loader')
-    run_tests_multi_motion_predict(n_epochs=10, in_size=320, batch_size=256, samples_per_epoch=17000 // 10,
-                                   sample_history_num_frames=10, history_num_frames=10, future_num_frames=50,
+    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000,
+                                   sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
                                    group_scenes=False,
                                    clsTrainDataset=MultiMotionPredictChoppedDataset,
                                    clsValDataset=MotionPredictChoppedDataset,
@@ -1993,24 +2015,47 @@ if __name__ == '__main__':
                                    aug='none',
                                    loader_fn=double_channel_agents_ego_map_transform,
                                    cfg_fn=create_config_multi_train_chopped,
-                                   str_train_loaders=['train_data_loader_10'],
+                                   str_train_loaders=['train_data_loader_100'],
                                    rasterizer_fn=build_rasterizer)
 
-    run_forecast_multi_motion_predict(n_epochs=1000, in_size=320, batch_size=256, samples_per_epoch=17000 // 10,
-                                      sample_history_num_frames=10, history_num_frames=10, future_num_frames=50,
-                                      group_scenes=False,
-                                      clsTrainDataset=MultiMotionPredictChoppedDataset,
-                                      clsValDataset=MotionPredictChoppedDataset,
-                                      clsModel=LyftResnet18Transform,
-                                      fit_fn='fit_fastai_transform', val_fn='test_transform',
-                                      loss_fn=neg_log_likelihood_transform,
-                                      aug='none',
-                                      loader_fn=double_channel_agents_ego_map_transform,
-                                      cfg_fn=create_config_multi_train_chopped,
-                                      str_train_loaders=['train_data_loader_10', 'train_data_loader_30',
-                                                         'train_data_loader_50', 'train_data_loader_70',
-                                                         'train_data_loader_90', 'train_data_loader_110',
-                                                         'train_data_loader_130', 'train_data_loader_150',
-                                                         'train_data_loader_180', 'train_data_loader_200'],
-                                      rasterizer_fn=build_rasterizer)
+    run_forecast_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000,
+                                   sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
+                                   group_scenes=False,
+                                   clsTrainDataset=MultiMotionPredictChoppedDataset,
+                                   clsValDataset=MotionPredictChoppedDataset,
+                                   clsModel=LyftResnet18Transform,
+                                   fit_fn='fit_fastai_transform', val_fn='test_transform',
+                                   loss_fn=neg_log_likelihood_transform,
+                                   aug='none',
+                                   loader_fn=double_channel_agents_ego_map_transform,
+                                   cfg_fn=create_config_multi_train_chopped,
+                                   str_train_loaders=['train_data_loader_100'],
+                                   rasterizer_fn=build_rasterizer)
 
+    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000,
+                                   sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
+                                   group_scenes=False,
+                                   clsTrainDataset=MultiMotionPredictChoppedDataset,
+                                   clsValDataset=MotionPredictChoppedDataset,
+                                   clsModel=LyftResnet18Transform,
+                                   fit_fn='fit_fastai_transform', val_fn='test_transform',
+                                   loss_fn=neg_log_likelihood_transform,
+                                   aug='none',
+                                   loader_fn=double_channel_agents_ego_map_avg_transform,
+                                   cfg_fn=create_config_multi_train_chopped,
+                                   str_train_loaders=['train_data_loader_100'],
+                                   rasterizer_fn=build_rasterizer)
+
+    run_forecast_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000,
+                                   sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
+                                   group_scenes=False,
+                                   clsTrainDataset=MultiMotionPredictChoppedDataset,
+                                   clsValDataset=MotionPredictChoppedDataset,
+                                   clsModel=LyftResnet18Transform,
+                                   fit_fn='fit_fastai_transform', val_fn='test_transform',
+                                   loss_fn=neg_log_likelihood_transform,
+                                   aug='none',
+                                   loader_fn=double_channel_agents_ego_map_avg_transform,
+                                   cfg_fn=create_config_multi_train_chopped,
+                                   str_train_loaders=['train_data_loader_100'],
+                                   rasterizer_fn=build_rasterizer)
