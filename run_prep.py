@@ -239,10 +239,10 @@ if __name__ == '__main__':
     """
 
     chop_indices = [10, 30, 50, 70, 90, 110, 130, 150, 180, 200]
-    target_loader = 'train_data_loader'
 
-    for n in chop_indices:
-        print(n)
-        save_multi_datasets(str_data_loader=target_loader, num_frames_to_chop=[n])
+    for str_loader in ['train_data_loader', 'val_data_loader']:
+        for n in chop_indices:
+            print(' : '.join((str_loader, str(n))))
+            save_multi_datasets(str_data_loader=str_loader, num_frames_to_chop=[n])
 
 

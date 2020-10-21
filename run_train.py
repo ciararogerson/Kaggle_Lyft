@@ -578,7 +578,7 @@ def generate_agent_sample_random_ego_center(
         else rasterizer.rasterize(history_frames, history_agents, history_tl_faces, selected_agent)
     )
 
-    world_from_agent = compute_agent_pose(agent_centroid_m, agent_yaw_rad)
+    world_from_agent = compute_agent_pose(agent_centroid, agent_yaw)
     agent_from_world = np.linalg.inv(world_from_agent)
     raster_from_world = render_context.raster_from_world(agent_centroid, agent_yaw)
 
@@ -991,6 +991,43 @@ def double_channel_agents_ego_map_transform(dataset, idx, args_dict, cfg, str_da
     return [x, transform_matrix, centroid, ego_center], y
 
 
+def double_channel_agents_ego_map_avg_transform(dataset, idx, args_dict, cfg, str_data_loader, info=False, info_dict=None):
+    """
+    double_channel_agents_ego_map tailored to multi mode output model 
+    including centroid and raster_from_world matrix
+    """
+    if info:
+        n_input_channels = 5 # Each ego/agent is condensed into two channels, each map is condensed into 1
+        n_output = info_dict['n_modes'] + (info_dict['future_num_frames'] * 3 * info_dict['n_modes']) # n_confs + (future_num_frames * (x, y, yaws) * modes)
+        return n_input_channels, n_output
+
+    data = check_load(get_cache_filename(idx, args_dict, cfg, 'double_channel_agents_ego_map_transform', str_data_loader),
+                      return_idx, idx, CREATE_CACHE, (dataset, idx))
+
+    im = data["image"].transpose(1, 2, 0)
+
+    n, im_map, im_agents_history, im_agents_current, im_ego_history, im_ego_current = split_im(im)
+
+    history_idx = generate_history_idx(n - 1, args_dict['sample_history_num_frames'], args_dict['SHUFFLE'])
+
+    im_map = np.sum(im_map, axis=-1)
+
+    im_agents_history = np.mean(im_agents_history[:, :, history_idx], axis=-1)
+
+    im_ego_history = np.mean(im_ego_history[:, :, history_idx], axis=-1)
+
+    im_reduced = np.stack([im_agents_history, im_agents_current, im_ego_history, im_ego_current, im_map], axis=-1)
+
+    transforms = make_transform(args_dict['TRANSFORMS']) if 'TRANSFORMS' in args_dict else None
+    im_reduced = augment_img(im_reduced, transforms)
+
+    x = numpy_to_torch(im_reduced)
+
+    y, transform_matrix, centroid, ego_center = create_y_transform_tensor(data, cfg)
+
+    return [x, transform_matrix, centroid, ego_center], y
+
+
 def double_channel_agents_ego_map_dayhour(dataset, idx, args_dict, cfg, str_data_loader, info=False, info_dict=None):
     """
     double_channel_agents_ego_map tailored to multi mode output model
@@ -1091,14 +1128,12 @@ def generate_history_idx(n, history_num_frames, shuffle=False):
 
 def create_y_transform_tensor(data, cfg):
 
-    # Target_positions are in world coordinates in metres
-    
-    y_pos = torch.Tensor(data['target_positions']).float() 
+    # Target_positions are in raster coordinates in metres
+    y_pos_transform = torch.Tensor(data['target_positions']).float() 
     yaws = torch.Tensor(data['target_yaws']).float()
     y_avail = torch.Tensor(data['target_availabilities'].reshape(-1, 1)).float()
 
-    world_to_image = torch.Tensor(data['world_to_image']).float()
-    world_from_image = torch.inverse(world_to_image)
+    world_from_agent = torch.Tensor(data['world_from_agent']).float()
     centroid = torch.Tensor(data['centroid'][None, :]).float()
 
     if 'ego_center' in data:
@@ -1106,25 +1141,25 @@ def create_y_transform_tensor(data, cfg):
     else:
         ego_center = torch.Tensor(np.array(cfg['raster_params']['ego_center'])[None, :]).float()
 
-    # y_pos_transform = y in raster coordinates
-    y_pos_transform = transform_points(y_pos.clone() + centroid[:2], world_to_image)
-
+    # y_pos = world coordinates
+    y_pos = transform_points(y_pos_transform, world_from_agent) - centroid[:2]
 
     # CHECKS:
     if False:
         # If we go from y_pos_transform -> y_pos do we get back to the original correctly?
         # (Checking for use of reverse_transform_y later...)
-        y_pos_test = reverse_transform_y(y_pos_transform.clone().unsqueeze(0), 
-                                        centroid, 
-                                        world_from_image, 1).squeeze(0) # Single mode
-        np.allclose(y_pos_test.numpy(), y_pos, atol=0.001)
+        world_pos = transform_points(data['target_positions'], data['world_from_agent']) - centroid.numpy()[:2]
+        y_pos_test = reverse_transform_y(y_pos_transform.clone().unsqueeze(0), centroid, world_from_agent, 1).squeeze(0)
+        np.allclose(y_pos_test.numpy(), world_pos, atol=0.001)
     
     y = torch.cat([y_pos, yaws, y_pos_transform, yaws, y_avail], dim=1)
 
-    return y, world_from_image, centroid, ego_center
+    return y, world_from_agent, centroid, ego_center
 
 
-def reverse_transform_y(y, centroid, world_from_image, n_modes):
+def reverse_transform_y(y, centroid, world_from_agent, n_modes, run_check=False):
+
+    if run_check: y_orig = y.clone()
 
     device = y.device
 
@@ -1133,14 +1168,20 @@ def reverse_transform_y(y, centroid, world_from_image, n_modes):
     if not is_4d:
         y = y[None, :, :, :]
         centroid = centroid[None, :, :]
-        world_from_image = world_from_image[None, :, :]
+        world_from_agent = world_from_agent[None, :, :]
 
     batch_size = y.shape[0]
+    n_future_frames = y.shape[2]
 
-    for i in range(batch_size):
-        for m in range(n_modes):
-            y[i, m, :, :] = transform_points(y[i, m, :, :], world_from_image[i])
-    
+    y = torch.cat([y, torch.ones((batch_size, n_modes, n_future_frames, 1)).to(device)], dim=3)
+    y = torch.stack([torch.matmul(world_from_agent, y[:, i].transpose(1, 2)) for i in range(y.shape[1])], dim=1)
+    y = y.transpose(2, 3)[:, :, :, :2]
+
+    if run_check:
+        # Check that matrix transform works the same as the l5kit version
+        test = transform_points(y_orig[0, 0], world_from_agent[0])
+        np.allclose(test.detach().cpu().numpy(), y[0, 0].detach().cpu().numpy())
+
     y = y - centroid[:, None, :, :].to(device)
 
     if not is_4d:
@@ -1188,7 +1229,7 @@ def create_loader(clsDataset, fn_rasterizer, fn_create, cfg, args_dict, str_load
     # Checks:
     #_dataset.plot_index(0)
     _dataset[0]
-    
+
     if isinstance(str_loader, (list, tuple)):
         loader = DataLoader(_dataset,
                         shuffle=cfg[str_loader[0]]["shuffle"],
@@ -1627,7 +1668,7 @@ class LyftResnet18Transform(LyftResnet18Small):
     def forward(self, *_x):
 
         x = _x[0]
-        world_from_raster = _x[1]
+        world_from_agent = _x[1]
         centroid = _x[2]
         ego_center = _x[3]
 
@@ -1643,7 +1684,7 @@ class LyftResnet18Transform(LyftResnet18Small):
         # but we also append original coordinates by calling reverse_transform_y() on the predictions.
         x_confs = x[:, :n_modes]
         x_transform = x[:, n_modes:].reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :, :2].float()
-        x_orig = reverse_transform_y(x_transform.clone(), centroid.float(), world_from_raster.float(), n_modes)
+        x_orig = reverse_transform_y(x_transform.clone(), centroid.float(), world_from_agent.float(), n_modes)
  
         yaws = torch.ones((batch_size, n_modes, future_num_frames, 1)).to(DEVICE)
 
@@ -2001,8 +2042,29 @@ def run_forecast_multi_motion_predict(model_str='', str_network='resnet18',
     return test_dict
 
 
-if __name__ == '__main__':
+def test_agent_dataset():
+    cfg = create_config_multi_train_chopped('')
+    str_loader = 'train_data_loader_10'
+    
+    dm = LocalDataManager(None)
+    rasterizer = build_rasterizer(cfg, dm)
+    data_zarr = ChunkedDataset(dm.require(cfg[str_loader]["key"])).open()
 
+    raw_data_file = os.path.splitext(cfg[str_loader]["key"])[0].replace('scenes/', '')
+
+    mask = np.load(cfg[str_loader]['mask_path'])["arr_0"]
+    ds = AgentDataset(cfg, data_zarr, rasterizer, agents_mask=mask)#get_dataset(cfg)(raw_data_file, cfg, str_loader, data_zarr, rasterizer, agents_mask=mask)
+        
+    for i in range(30):
+        data = ds[i]
+        plt.plot(data['target_positions'][:, 0], data['target_positions'][:, 1])
+
+    plt.show()
+
+
+
+if __name__ == '__main__':
+    
     print('FIXED MULTI DATASET, NO AUG, 10 x train_data_loader')
     run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000,
                                    sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
