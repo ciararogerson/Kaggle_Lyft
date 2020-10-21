@@ -43,7 +43,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from utils import *
 from settings import BASE_DIR, DATA_DIR, CACHE_DIR, MODEL_DIR
-from configs import create_config
+from configs import create_prep_config
 
 
 
@@ -89,52 +89,58 @@ def create_chopped_dataset_CF(
     gt_path = dest_path / "gt.csv"
     mask_chopped_path = dest_path / "mask"
 
-    # Create standard mask for the dataset so we can use it to filter out unreliable agents
-    zarr_dt = ChunkedDataset(str(zarr_path))
-    zarr_dt.open()
+    if not os.path.exists(gt_path):
+        # Create standard mask for the dataset so we can use it to filter out unreliable agents
+        zarr_dt = ChunkedDataset(str(zarr_path))
+        zarr_dt.open()
 
-    agents_mask_path = Path(zarr_path) / f"agents_mask/{th_agent_prob}"
-    if not agents_mask_path.exists():  # don't check in root but check for the path
-        select_agents(
-            zarr_dt,
-            th_agent_prob=th_agent_prob,
-            th_yaw_degree=TH_YAW_DEGREE,
-            th_extent_ratio=TH_EXTENT_RATIO,
-            th_distance_av=TH_DISTANCE_AV,
-        )
-    agents_mask_origin = np.asarray(convenience.load(str(agents_mask_path)))
+        agents_mask_path = Path(zarr_path) / f"agents_mask/{th_agent_prob}"
+        if not agents_mask_path.exists():  # don't check in root but check for the path
+            select_agents(
+                zarr_dt,
+                th_agent_prob=th_agent_prob,
+                th_yaw_degree=TH_YAW_DEGREE,
+                th_extent_ratio=TH_EXTENT_RATIO,
+                th_distance_av=TH_DISTANCE_AV,
+            )
+        agents_mask_origin = np.asarray(convenience.load(str(agents_mask_path)))
 
-    # create chopped dataset
-    chopped_indices_filename = os.path.join(os.path.split(chopped_path)[0], 'chopped_indices.pkl')
-    chopped_indices = check_load(chopped_indices_filename,  zarr_scenes_chop_CF, str(chopped_path), save_to_file=True, args_in=(str(zarr_path), str(chopped_path), num_frames_to_copy), verbose=True) 
-    
-    zarr_chopped = ChunkedDataset(str(chopped_path))
-    zarr_chopped.open()
+        # create chopped dataset
+        chopped_indices_filename = os.path.join(os.path.split(chopped_path)[0], 'chopped_indices.pkl')
+        chopped_indices = check_load(chopped_indices_filename,  zarr_scenes_chop_CF, str(chopped_path), save_to_file=True, args_in=(str(zarr_path), str(chopped_path), num_frames_to_copy), verbose=True)
 
-    # compute the chopped boolean mask, but also the original one limited to frames of interest for GT csv
-    agents_mask_chop_bool = np.zeros(len(zarr_chopped.agents), dtype=np.bool)
-    agents_mask_orig_bool = np.zeros(len(zarr_dt.agents), dtype=np.bool)
+        zarr_chopped = ChunkedDataset(str(chopped_path))
+        zarr_chopped.open()
 
-    for idx in tqdm(range(len(zarr_dt.scenes)), desc='Extracting masks'):
+        # compute the chopped boolean mask, but also the original one limited to frames of interest for GT csv
+        agents_mask_chop_bool = np.zeros(len(zarr_chopped.agents), dtype=np.bool)
+        agents_mask_orig_bool = np.zeros(len(zarr_dt.agents), dtype=np.bool)
 
-        scene = zarr_dt.scenes[idx]
+        for idx in tqdm(range(len(zarr_dt.scenes)), desc='Extracting masks'):
 
-        frame_original = zarr_dt.frames[scene["frame_index_interval"][0] + num_frames_to_copy - 1]
-        slice_agents_original = get_agents_slice_from_frames(frame_original)
+            scene = zarr_dt.scenes[idx]
 
-        mask = agents_mask_origin[slice_agents_original][:, 1] >= min_frame_future
-        agents_mask_orig_bool[slice_agents_original] = mask.copy()
+            frame_original = zarr_dt.frames[scene["frame_index_interval"][0] + num_frames_to_copy - 1]
+            slice_agents_original = get_agents_slice_from_frames(frame_original)
 
-        if idx in chopped_indices:
+            mask = agents_mask_origin[slice_agents_original][:, 1] >= min_frame_future
+            agents_mask_orig_bool[slice_agents_original] = mask.copy()
 
-            frame_chopped = zarr_chopped.frames[zarr_chopped.scenes[chopped_indices.index(idx)]["frame_index_interval"][-1] - 1]
-            slice_agents_chopped = get_agents_slice_from_frames(frame_chopped)
+            if idx in chopped_indices:
 
-            agents_mask_chop_bool[slice_agents_chopped] = mask.copy()
+                frame_chopped = zarr_chopped.frames[zarr_chopped.scenes[chopped_indices.index(idx)]["frame_index_interval"][-1] - 1]
+                slice_agents_chopped = get_agents_slice_from_frames(frame_chopped)
 
-    # store the mask and the GT csv of frames on interest
-    np.savez(str(mask_chopped_path), agents_mask_chop_bool)
-    export_zarr_to_csv(zarr_dt, str(gt_path), num_frames_gt, th_agent_prob, agents_mask=agents_mask_orig_bool)
+                agents_mask_chop_bool[slice_agents_chopped] = mask.copy()
+
+        # store the mask and the GT csv of frames on interest
+        np.savez(str(mask_chopped_path), agents_mask_chop_bool)
+        export_zarr_to_csv(zarr_dt, str(gt_path), num_frames_gt, th_agent_prob, agents_mask=agents_mask_orig_bool)
+
+    else:
+
+        print(' : '.join((str(gt_path), 'COMPLETED')))
+
     return str(dest_path)
 
 
@@ -221,7 +227,7 @@ def save_chopped_ds_cf(cfg, str_data_loader='train_data_loader', num_frames_to_c
     return chopped_ds_path
 
 
-def save_multi_datasets(config = create_config(), str_data_loader='train_data_loader', num_frames_to_chop=[30, 100, 180]):
+def save_multi_datasets(config = create_prep_config(), str_data_loader='train_data_loader', num_frames_to_chop=[30, 100, 180]):
 
     with ThreadPoolExecutor(max_workers=NUM_WORKERS) as e:
         for n in num_frames_to_chop:
@@ -238,11 +244,11 @@ if __name__ == '__main__':
     Defaulting to single runs here
     """
 
-    chop_indices = [10, 30, 50, 70, 90, 110, 130, 150, 180, 200]
+    chop_indices = [[10, 30, 50, 70, 90], [110, 130, 150], [180, 200]]
 
     for str_loader in ['train_data_loader', 'val_data_loader']:
         for n in chop_indices:
             print(' : '.join((str_loader, str(n))))
-            save_multi_datasets(str_data_loader=str_loader, num_frames_to_chop=[n])
+            save_multi_datasets(str_data_loader=str_loader, num_frames_to_chop=[n] if not isinstance(n, list) else n)
 
 
