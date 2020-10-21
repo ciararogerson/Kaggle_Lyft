@@ -46,10 +46,10 @@ from l5kit.rasterization.sem_box_rasterizer import SemBoxRasterizer
 from l5kit.rasterization.box_rasterizer import BoxRasterizer
 from l5kit.rasterization.rasterizer import Rasterizer, EGO_EXTENT_HEIGHT, EGO_EXTENT_LENGTH, EGO_EXTENT_WIDTH
 from l5kit.rasterization.semantic_rasterizer import SemanticRasterizer, elements_within_bounds, cv2_subpixel, CV2_SHIFT, CV2_SHIFT_VALUE
-
+from l5kit.rasterization.render_context import RenderContext
 from l5kit.evaluation import write_pred_csv, compute_metrics_csv, read_gt_csv, write_gt_csv
 from l5kit.evaluation.metrics import neg_multi_log_likelihood, time_displace
-from l5kit.geometry import transform_point, transform_points, world_to_image_pixels_matrix, rotation33_as_yaw
+from l5kit.geometry import transform_point, transform_points, rotation33_as_yaw, compute_agent_pose
 from l5kit.visualization import PREDICTED_POINTS_COLOR, TARGET_POINTS_COLOR, draw_trajectory
 from l5kit.sampling.slicing import get_future_slice, get_history_slice
 from l5kit.sampling.agent_sampling import _create_targets_for_deep_prediction
@@ -238,10 +238,7 @@ class AgentDatasetCF(AgentDataset):
 
         """
         frames = self.dataset.frames[get_frames_slice_from_scenes(self.dataset.scenes[scene_index])]
-        data = self.sample_function(state_index, frames, self.dataset.agents, self.dataset.tl_faces, track_id, 
-                                    raster_size=tuple(self.cfg['raster_params']['raster_size']), 
-                                    pixel_size=np.array(self.cfg['raster_params']['pixel_size']), 
-                                    ego_center=np.array(self.cfg['raster_params']['ego_center']))
+        data = self.sample_function(state_index, frames, self.dataset.agents, self.dataset.tl_faces, track_id)
         
         # 0,1,C -> C,0,1
         image = data["image"].transpose(2, 0, 1)
@@ -273,14 +270,15 @@ class AgentDatasetCF(AgentDataset):
             "history_positions": history_positions,
             "history_yaws": history_yaws,
             "history_availabilities": data["history_availabilities"],
-            "world_to_image": data["world_to_image"],
+            "raster_from_world": data["raster_from_world"],
+            "world_from_agent": data["world_from_agent"],
+            "agent_from_world": data["agent_from_world"],
             "track_id": track_id,
             "timestamp": timestamp,
             "centroid": data["centroid"],
             "ego_center": ego_center,
             "yaw": data["yaw"],
             "extent": data["extent"],
-            "label_probabilities": data["label_probabilities"],
         }
 
 
@@ -313,12 +311,15 @@ class AgentDatasetRandomEgoCentre(AgentDatasetCF):
                                                             min_frame_history, 
                                                             min_frame_future)
 
+        render_context = RenderContext(
+            raster_size_px=np.array(cfg["raster_params"]["raster_size"]),
+            pixel_size_m=np.array(cfg["raster_params"]["pixel_size"]),
+            center_in_raster_ratio=np.array(cfg["raster_params"]["ego_center"]),
+        )
         # Overwrite sample function:
         # build a partial so we don't have to access cfg each time
         self.sample_function = partial(generate_agent_sample_random_ego_center,
-                                        raster_size=cast(Tuple[int, int], tuple(cfg["raster_params"]["raster_size"])),
-                                        pixel_size=np.array(cfg["raster_params"]["pixel_size"]),
-                                        ego_center=np.array(cfg["raster_params"]["ego_center"]),
+                                        render_context=render_context,
                                         history_num_frames=cfg["model_params"]["history_num_frames"],
                                         history_step_size=cfg["model_params"]["history_step_size"],
                                         future_num_frames=cfg["model_params"]["future_num_frames"],
@@ -341,35 +342,31 @@ class SemanticTLRasterizer(SemanticRasterizer):
         history_tl_faces: List[np.ndarray],
         agent: Optional[np.ndarray] = None,
     ) -> np.ndarray:
-        # TODO TR_FACES
-
         if agent is None:
-            ego_translation = history_frames[0]["ego_translation"]
-            ego_yaw = rotation33_as_yaw(history_frames[0]["ego_rotation"])
+            ego_translation_m = history_frames[0]["ego_translation"]
+            ego_yaw_rad = rotation33_as_yaw(history_frames[0]["ego_rotation"])
         else:
-            ego_translation = np.append(agent["centroid"], history_frames[0]["ego_translation"][-1])
-            ego_yaw = agent["yaw"]
+            ego_translation_m = np.append(agent["centroid"], history_frames[0]["ego_translation"][-1])
+            ego_yaw_rad = agent["yaw"]
 
-        world_to_image_space = world_to_image_pixels_matrix(
-            self.raster_size, self.pixel_size, ego_translation, ego_yaw, self.ego_center,
-        )
+        raster_from_world = self.render_context.raster_from_world(ego_translation_m, ego_yaw_rad)
+        world_from_raster = np.linalg.inv(raster_from_world)
 
         # get XY of center pixel in world coordinates
-        center_pixel = np.asarray(self.raster_size) * (0.5, 0.5)
-        center_world = transform_point(center_pixel, np.linalg.inv(world_to_image_space))
+        center_in_raster_px = np.asarray(self.raster_size) * (0.5, 0.5)
+        center_in_world_m = transform_point(center_in_raster_px, world_from_raster)
 
-        sem_im = self.render_semantic_map(center_world, world_to_image_space, history_tl_faces)
+        sem_im = self.render_semantic_map(center_in_world_m, raster_from_world, history_tl_faces)
         return sem_im.astype(np.float32) / 255
 
-
     def render_semantic_map(
-        self, center_world: np.ndarray, world_to_image_space: np.ndarray, history_tl_faces: List[np.ndarray]
+        self, center_world: np.ndarray, raster_from_world: np.ndarray, history_tl_faces: List[np.ndarray]
     ) -> np.ndarray:
         """Renders the semantic map at given x,y coordinates.
 
         Args:
             center_world (np.ndarray): XY of the image center in world ref system
-            world_to_image_space (np.ndarray):
+            raster_from_world (np.ndarray):
         Returns:
             np.ndarray: RGB raster
 
@@ -392,8 +389,8 @@ class SemanticTLRasterizer(SemanticRasterizer):
 
             # get image coords
             lane_coords = self.proto_API.get_lane_coords(self.bounds_info["lanes"]["ids"][idx])
-            xy_left = cv2_subpixel(transform_points(lane_coords["xyz_left"][:, :2], world_to_image_space))
-            xy_right = cv2_subpixel(transform_points(lane_coords["xyz_right"][:, :2], world_to_image_space))
+            xy_left = cv2_subpixel(transform_points(lane_coords["xyz_left"][:, :2], raster_from_world))
+            xy_right = cv2_subpixel(transform_points(lane_coords["xyz_right"][:, :2], raster_from_world))
             lanes_area = np.vstack((xy_left, np.flip(xy_right, 0)))  # start->end left then end->start right
 
             # Note(lberg): this called on all polygons skips some of them, don't know why
@@ -429,7 +426,7 @@ class SemanticTLRasterizer(SemanticRasterizer):
         for idx in elements_within_bounds(center_world, self.bounds_info["crosswalks"]["bounds"], raster_radius):
             crosswalk = self.proto_API.get_crosswalk_coords(self.bounds_info["crosswalks"]["ids"][idx])
 
-            xy_cross = cv2_subpixel(transform_points(crosswalk["xyz"][:, :2], world_to_image_space))
+            xy_cross = cv2_subpixel(transform_points(crosswalk["xyz"][:, :2], raster_from_world))
             crosswalks.append(xy_cross)
 
         cv2.polylines(img, crosswalks, True, (255, 117, 69), lineType=cv2.LINE_AA, shift=CV2_SHIFT)
@@ -450,18 +447,16 @@ class SemBoxTLRasterizer(SemBoxRasterizer):
 
     def __init__(
         self,
-        raster_size: Tuple[int, int],
-        pixel_size: np.ndarray,
-        ego_center: np.ndarray,
+        render_context: RenderContext,
         filter_agents_threshold: float,
         history_num_frames: int,
         semantic_map_path: str,
         world_to_ecef: np.ndarray,
     ):
-        super(SemBoxTLRasterizer, self).__init__(raster_size, pixel_size, ego_center, filter_agents_threshold, history_num_frames, semantic_map_path, world_to_ecef)
+        super(SemBoxTLRasterizer, self).__init__(render_context, filter_agents_threshold, history_num_frames, semantic_map_path, world_to_ecef)
 
         # Change self.sat_rast reference to include traffic lights as separate channel
-        self.sat_rast = SemanticTLRasterizer(raster_size, pixel_size, ego_center, semantic_map_path, world_to_ecef)
+        self.sat_rast = SemanticTLRasterizer(render_context, semantic_map_path, world_to_ecef)
 
 
 def generate_agent_sample_random_ego_center(
@@ -470,9 +465,7 @@ def generate_agent_sample_random_ego_center(
     agents: np.ndarray,
     tl_faces: np.ndarray,
     selected_track_id: Optional[int],
-    raster_size: Tuple[int, int],
-    pixel_size: np.ndarray,
-    ego_center: np.ndarray,
+    render_context: RenderContext,
     history_num_frames: int,
     history_step_size: int,
     future_num_frames: int,
@@ -517,6 +510,7 @@ def generate_agent_sample_random_ego_center(
         dict: a dict object with the raster array, the future offset coordinates (meters),
         the future yaw angular offset, the future_availability as a binary mask
     """
+    ego_center = render_context.center_in_raster_ratio
 
     # Augment ego_center
     rand_ego_center = np.array([ego_center[0] * np.random.uniform(0.6, 1.8), ego_center[1] * np.random.uniform(0.6, 1.8)])
@@ -582,13 +576,10 @@ def generate_agent_sample_random_ego_center(
         else rasterizer.rasterize(history_frames, history_agents, history_tl_faces, selected_agent)
     )
 
-    world_to_image_space = world_to_image_pixels_matrix(
-        raster_size,
-        pixel_size,
-        ego_translation_m=agent_centroid,
-        ego_yaw_rad=agent_yaw,
-        ego_center_in_image_ratio=rand_ego_center,
-    )
+    world_from_agent = compute_agent_pose(agent_centroid_m, agent_yaw_rad)
+    agent_from_world = np.linalg.inv(world_from_agent)
+    raster_from_world = render_context.raster_from_world(agent_centroid, agent_yaw)
+
 
     future_coords_offset, future_yaws_offset, future_availability = _create_targets_for_deep_prediction(
         future_num_frames, future_frames, selected_track_id, future_agents, agent_centroid[:2], agent_yaw,
@@ -607,7 +598,9 @@ def generate_agent_sample_random_ego_center(
         "history_positions": history_coords_offset,
         "history_yaws": history_yaws_offset,
         "history_availabilities": history_availability,
-        "world_to_image": world_to_image_space,
+        "raster_from_world": raster_from_world,
+        "world_from_agent": world_from_agent,
+        "agent_from_world": agent_from_world,
         "centroid": agent_centroid,
         "ego_center": rand_ego_center,
         "yaw": agent_yaw,
@@ -635,9 +628,11 @@ def build_rasterizer_tl(cfg: dict, data_manager: DataManager) -> Rasterizer:
     map_type = raster_cfg["map_type"]
     dataset_meta_key = raster_cfg["dataset_meta_key"]
 
-    raster_size: Tuple[int, int] = cast(Tuple[int, int], tuple(raster_cfg["raster_size"]))
-    pixel_size = np.array(raster_cfg["pixel_size"])
-    ego_center = np.array(raster_cfg["ego_center"])
+    render_context = RenderContext(
+            raster_size_px=np.array(raster_cfg["raster_size"]),
+            pixel_size_m=np.array(raster_cfg["pixel_size"]),
+            center_in_raster_ratio=np.array(raster_cfg["ego_center"]),
+        )
     filter_agents_threshold = raster_cfg["filter_agents_threshold"]
     history_num_frames = cfg["model_params"]["history_num_frames"]
 
@@ -648,7 +643,7 @@ def build_rasterizer_tl(cfg: dict, data_manager: DataManager) -> Rasterizer:
     except (KeyError, FileNotFoundError):  # TODO remove when new dataset version is available
         world_to_ecef = get_hardcoded_world_to_ecef()
     
-    return SemBoxTLRasterizer(raster_size, pixel_size, ego_center, filter_agents_threshold, history_num_frames, semantic_map_filepath, world_to_ecef)
+    return SemBoxTLRasterizer(render_context, filter_agents_threshold, history_num_frames, semantic_map_filepath, world_to_ecef)
 
 
 ##############################################
@@ -831,7 +826,7 @@ class MotionPredictDataset(Dataset):
 
         im = data["image"].transpose(1, 2, 0)
         im = self.ds.rasterizer.to_rgb(im)
-        target_positions_pixels = transform_points(data["target_positions"] + data["centroid"][:2], data["world_to_image"])
+        target_positions_pixels = transform_points(data["target_positions"] + data["centroid"][:2], data["raster_from_world"])
         draw_trajectory(im, target_positions_pixels, data["target_yaws"], TARGET_POINTS_COLOR)
 
         plt.imshow(im[::-1])
@@ -960,7 +955,7 @@ def get_cache_filename(idx, args_dict, cfg, str_fn_create, str_data_loader):
 def double_channel_agents_ego_map_transform(dataset, idx, args_dict, cfg, str_data_loader, info=False, info_dict=None):
     """
     double_channel_agents_ego_map tailored to multi mode output model 
-    including centroid and world_to_image matrix
+    including centroid and raster_from_world matrix
     """
     if info:
         n_input_channels = 5 # Each ego/agent is condensed into two channels, each map is condensed into 1
@@ -997,7 +992,7 @@ def double_channel_agents_ego_map_transform(dataset, idx, args_dict, cfg, str_da
 def double_channel_agents_ego_map_dayhour(dataset, idx, args_dict, cfg, str_data_loader, info=False, info_dict=None):
     """
     double_channel_agents_ego_map tailored to multi mode output model
-    including centroid and world_to_image matrix
+    including centroid and raster_from_world matrix
     """
     if info:
         n_input_channels = 6 # Each ego/agent is condensed into two channels, each map is condensed into 1
@@ -1094,47 +1089,12 @@ def generate_history_idx(n, history_num_frames, shuffle=False):
 
 def create_y_transform_tensor(data, cfg):
 
-    y_pos = torch.Tensor(data['target_positions']).float()
+    # In new version, target_positions are raster coordinates and are given in metres.
+    y_pos_transform = torch.Tensor(data['target_positions']).float() 
     yaws = torch.Tensor(data['target_yaws']).float()
     y_avail = torch.Tensor(data['target_availabilities'].reshape(-1, 1)).float()
 
-    transform_matrix = torch.Tensor(data['world_to_image']).float()
-    centroid = torch.Tensor(data['centroid'][None, :]).float()
-
-    if 'ego_center' in data:
-        ego_center = torch.Tensor(data['ego_center'][None, :]).float()
-    else:
-        ego_center = torch.Tensor(np.array(cfg['raster_params']['ego_center'])[None, :]).float()
-
-    y_pos_transform = transform_y(y_pos.clone(), centroid, transform_matrix, cfg['raster_params']['raster_size'], ego_center)
-
-    ## CHECKS ##
-    if False:
-        target_positions_pixels = transform_points(data["target_positions"] + data["centroid"][:2], data["world_to_image"])
-        bias = np.concatenate([cfg['raster_params']['raster_size'][0]*ego_center[:, 0].clone().numpy(), 
-                                cfg['raster_params']['raster_size'][1]*ego_center[:, 1].clone().numpy()], axis=-1)
-        #bias = np.array([cfg['raster_params']['raster_size'][0] * cfg['raster_params']['ego_center'][0], cfg['raster_params']['raster_size'][1] * cfg['raster_params']['ego_center'][1]])[None, None, :]
-        np.allclose(target_positions_pixels - bias, y_pos_transform.numpy(), atol=0.001)
-
-        y_pos_transform_reverse = reverse_transform_y(y_pos_transform.clone().unsqueeze(0).unsqueeze(0), 
-                                                        centroid.unsqueeze(0), transform_matrix.unsqueeze(0), 
-                                                        cfg['raster_params']['raster_size'], ego_center.unsqueeze(0), 1)
-
-        np.allclose(y_pos.numpy(), y_pos_transform_reverse.numpy(), atol=0.001)
-    
-    y = torch.cat([y_pos, yaws, y_pos_transform, yaws, y_avail], dim=1)
-
-    return y, transform_matrix, centroid, ego_center
-
-
-def create_y_transform_tensor_new_l5kit(data, cfg):
-
-    # In new world, target_positions are img coordinates and are given in metres. Convert to pixels for equivalence with old version of l5kit
-    y_pos_transform = torch.Tensor(data['target_positions'] * cfg['raster_params']['pixel_size'][0]).float() 
-    yaws = torch.Tensor(data['target_yaws']).float()
-    y_avail = torch.Tensor(data['target_availabilities'].reshape(-1, 1)).float()
-
-    transform_matrix = torch.Tensor(data['world_to_image']).float()
+    world_from_agent = torch.Tensor(data['world_from_agent']).float()
     centroid = torch.Tensor(data['centroid'][None, :]).float()
 
     if 'ego_center' in data:
@@ -1145,70 +1105,23 @@ def create_y_transform_tensor_new_l5kit(data, cfg):
     # Calculate y in world coordinates in metres
     y_pos = reverse_transform_y(y_pos_transform.clone().unsqueeze(0).unsqueeze(0), 
                                 centroid.unsqueeze(0), 
-                                transform_matrix.unsqueeze(0), 
-                                cfg['raster_params']['raster_size'], ego_center.unsqueeze(0), 1)
-
-    ## CHECKS ##
-    if False:
-        # l5kit world coordinates in metres
-        world_positions = transform_points(data["target_positions"], data["world_from_image"]) - centroid[:2]
-        np.allclose(world_positions, y_pos.numpy(), atol=0.001)
-
-        y_pos_reverse =transform_y(y_pos.clone(), centroid, transform_matrix, cfg['raster_params']['raster_size'], ego_center, 1)
-
-        np.allclose(y_pos_transform.numpy(), y_pos_reverse.numpy() * cfg['raster_params']['pixel_size'][0], atol=0.001)
+                                world_from_agent.unsqueeze(0), 1)
     
     y = torch.cat([y_pos, yaws, y_pos_transform, yaws, y_avail], dim=1)
 
-    return y, transform_matrix, centroid, ego_center
+    return y, world_from_agent, centroid, ego_center
 
 
-def transform_y(y_pos, centroid, transform_matrix, raster_size, ego_center):
-
-    is_3d = y_pos.ndim == 3
-
-    device = y_pos.device
-
-    if not is_3d:
-        y_pos = y_pos[None, :, :]
-        centroid = centroid[None, :, :]
-        ego_center = ego_center[None, :, :]
-        transform_matrix = transform_matrix[None, :, :]
-
-    batch_size = y_pos.shape[0]
-    n_future_frames = y_pos.shape[1]
-
-    y_pos = y_pos + centroid
-    y_pos = torch.cat([y_pos, torch.ones((batch_size, n_future_frames, 1)).to(device)], dim=2)
-        
-    y_pos = torch.matmul(transform_matrix, y_pos.transpose(1, 2))
-    y_pos = y_pos.transpose(1, 2)[:, :, :2]
-        
-    bias = torch.cat([raster_size[0]*ego_center[:, :, 0], raster_size[1]*ego_center[:, :, 1]], dim=-1)[None, :].to(device)
-    y_pos = y_pos - bias
-
-    if not is_3d:
-        y_pos = y_pos.squeeze(0)
-
-    return y_pos
-
-
-def reverse_transform_y(pred, centroid, transform_matrix, raster_size, ego_center, n_modes):
+def reverse_transform_y(pred, centroid, world_from_agent, n_modes):
 
     device = pred.device
 
     batch_size = pred.shape[0]
-    n_future_frames = pred.shape[2]
 
-    transform_matrix_inv = torch.inverse(transform_matrix).to(device)
-
-    bias = torch.cat([raster_size[0]*ego_center[:, :, 0], raster_size[1]*ego_center[:, :, 1]], dim=-1)[:, None, None, :].to(device)
-
-    pred = pred + bias
-
-    pred = torch.cat([pred, torch.ones((batch_size, n_modes, n_future_frames, 1)).to(device)], dim=3)
-    pred = torch.stack([torch.matmul(transform_matrix_inv, pred[:, i].transpose(1, 2)) for i in range(pred.shape[1])], dim=1)
-    pred = pred.transpose(2, 3)[:, :, :, :2]
+    for i in range(batch_size):
+        for m in range(n_modes):
+            pred[i, m, :, :] = transform_points(pred[i, m, :, :], world_from_agent[i])
+    
     pred = pred - centroid[:, None, :, :].to(device)
 
     return pred
@@ -1708,7 +1621,7 @@ class LyftResnet18Transform(LyftResnet18Small):
         # but we also append original coordinates by calling reverse_transform_y() on the predictions.
         x_confs = x[:, :n_modes]
         x_transform = x[:, n_modes:].reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :, :2].float()
-        x_orig = reverse_transform_y(x_transform.clone(), centroid.float(), transform_matrix.float(), self.cfg['raster_params']['raster_size'], ego_center, n_modes)
+        x_orig = reverse_transform_y(x_transform.clone(), centroid.float(), transform_matrix.float(), n_modes)
  
         yaws = torch.ones((batch_size, n_modes, future_num_frames, 1)).to(DEVICE)
 
@@ -2069,7 +1982,7 @@ def run_forecast_multi_motion_predict(model_str='', str_network='resnet18',
 if __name__ == '__main__':
 
     print('FIXED MULTI DATASET, NO AUG, 10 x train_data_loader')
-    run_tests_multi_motion_predict(n_epochs=1000, in_size=320, batch_size=256, samples_per_epoch=17000 // 10,
+    run_tests_multi_motion_predict(n_epochs=10, in_size=320, batch_size=256, samples_per_epoch=17000 // 10,
                                    sample_history_num_frames=10, history_num_frames=10, future_num_frames=50,
                                    group_scenes=False,
                                    clsTrainDataset=MultiMotionPredictChoppedDataset,
@@ -2080,11 +1993,7 @@ if __name__ == '__main__':
                                    aug='none',
                                    loader_fn=double_channel_agents_ego_map_transform,
                                    cfg_fn=create_config_multi_train_chopped,
-                                   str_train_loaders=['train_data_loader_10', 'train_data_loader_30',
-                                                      'train_data_loader_50', 'train_data_loader_70',
-                                                      'train_data_loader_90', 'train_data_loader_110',
-                                                      'train_data_loader_130', 'train_data_loader_150',
-                                                      'train_data_loader_180', 'train_data_loader_200'],
+                                   str_train_loaders=['train_data_loader_10'],
                                    rasterizer_fn=build_rasterizer)
 
     run_forecast_multi_motion_predict(n_epochs=1000, in_size=320, batch_size=256, samples_per_epoch=17000 // 10,
