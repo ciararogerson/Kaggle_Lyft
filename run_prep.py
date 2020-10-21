@@ -59,8 +59,8 @@ MIN_FUTURE_STEPS = 10
 # L5KIT ADAPTATIONS
 ######################################
 
-def create_chopped_dataset_CF(
-    zarr_path: str, th_agent_prob: float, num_frames_to_copy: int, num_frames_gt: int, min_frame_future: int
+def create_chopped_dataset_lite(
+    zarr_path: str, th_agent_prob: float, num_frames_to_copy: int, num_frames_gt: int, min_frame_future: int, history_num_frames: int
 ) -> str:
     """
     Create a chopped version of the zarr that can be used as a test set.
@@ -107,7 +107,7 @@ def create_chopped_dataset_CF(
 
         # create chopped dataset
         chopped_indices_filename = os.path.join(os.path.split(chopped_path)[0], 'chopped_indices.pkl')
-        chopped_indices = check_load(chopped_indices_filename,  zarr_scenes_chop_CF, str(chopped_path), save_to_file=True, args_in=(str(zarr_path), str(chopped_path), num_frames_to_copy), verbose=True)
+        chopped_indices = check_load(chopped_indices_filename,  zarr_scenes_chop_lite, str(chopped_path), save_to_file=True, args_in=(str(zarr_path), str(chopped_path), num_frames_to_copy, history_num_frames), verbose=True)
 
         zarr_chopped = ChunkedDataset(str(chopped_path))
         zarr_chopped.open()
@@ -144,7 +144,7 @@ def create_chopped_dataset_CF(
     return str(dest_path)
 
 
-def zarr_scenes_chop_CF(input_zarr: str, output_zarr: str, num_frames_to_copy: int) -> None:
+def zarr_scenes_chop_lite(input_zarr: str, output_zarr: str, num_frames_to_copy: int, history_num_frames: int) -> None:
     """
     Copy `num_frames_to_keep` from each scene in input_zarr and paste them into output_zarr
 
@@ -178,11 +178,11 @@ def zarr_scenes_chop_CF(input_zarr: str, output_zarr: str, num_frames_to_copy: i
         first_frame_idx = scene["frame_index_interval"][0]
         last_frame_idx = scene["frame_index_interval"][-1]
 
-        if (last_frame_idx - first_frame_idx - num_frames_to_copy) >= 0:
+        if (last_frame_idx - first_frame_idx - num_frames_to_copy) >= 0 and num_frames_to_copy >= history_num_frames:
 
             chopped_indices.append(idx)
 
-            frames = input_dataset.frames[first_frame_idx : first_frame_idx + num_frames_to_copy]
+            frames = input_dataset.frames[first_frame_idx + num_frames_to_copy - history_num_frames: first_frame_idx + num_frames_to_copy]
             agents = input_dataset.agents[get_agents_slice_from_frames(*frames[[0, -1]])]
             tl_faces = input_dataset.tl_faces[get_tl_faces_slice_from_frames(*frames[[0, -1]])]
 
@@ -218,11 +218,11 @@ def zarr_scenes_chop_CF(input_zarr: str, output_zarr: str, num_frames_to_copy: i
 # DATA PREP
 ######################################
 
-def save_chopped_ds_cf(cfg, str_data_loader='train_data_loader', num_frames_to_chop=100, min_future_steps=10):
+def save_chopped_ds_lite(cfg, str_data_loader='train_data_loader', num_frames_to_chop=100, min_future_steps=10, history_num_frames=10):
 
     dm = LocalDataManager(None)
-    chopped_ds_path = create_chopped_dataset_CF(dm.require(cfg[str_data_loader]["key"]), cfg["raster_params"]["filter_agents_threshold"], 
-                                            num_frames_to_chop, cfg["model_params"]["future_num_frames"], min_future_steps)
+    chopped_ds_path = create_chopped_dataset_lite(dm.require(cfg[str_data_loader]["key"]), cfg["raster_params"]["filter_agents_threshold"], 
+                                            num_frames_to_chop, cfg["model_params"]["future_num_frames"], min_future_steps, history_num_frames)
 
     return chopped_ds_path
 
@@ -231,7 +231,7 @@ def save_multi_datasets(config = create_prep_config(), str_data_loader='train_da
 
     with ThreadPoolExecutor(max_workers=NUM_WORKERS) as e:
         for n in num_frames_to_chop:
-            e.submit(save_chopped_ds_cf, config, str_data_loader, n)
+            e.submit(save_chopped_ds_lite, config, str_data_loader, n)
 
 
 
@@ -244,7 +244,7 @@ if __name__ == '__main__':
     Defaulting to single runs here
     """
 
-    chop_indices = [[10, 30, 50, 70, 90], [110, 130, 150], [180, 200]]
+    chop_indices = [10, 30, 50, 70, 90, 110, 130, 150, 180, 200]
 
     for str_loader in ['train_data_loader', 'val_data_loader']:
         for n in chop_indices:
