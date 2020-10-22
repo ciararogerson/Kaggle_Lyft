@@ -193,7 +193,7 @@ class AgentDatasetCF(AgentDataset):
 
         item_ids = np.empty((len(self.agents_indices),), dtype=self.dataset.agents[0][str_item].dtype)
 
-        for i in tqdm(range(1, n_chunks + 1), desc='Loading agent items'):
+        for i in tqdm(range(1, len(index_chunks)), desc='Loading agent items'):
 
             agents_valid = np.argwhere(np.logical_and(self.agents_indices >= index_chunks[i-1], self.agents_indices < index_chunks[i])).reshape(-1,)
 
@@ -258,6 +258,7 @@ class AgentDatasetCF(AgentDataset):
         if self.gt is not None:
             assert str(track_id) + str(timestamp) in self.gt, 'self.gt (ground truth) does not contain requested track_id/timestamp combination. We have got a problem somewhere!'
             target_positions = np.array(self.gt[str(track_id) + str(timestamp)][0], dtype=np.float32)
+            target_positions = transform_points(target_positions + data['centroid'][:2], data['agent_from_world'] )
             target_availabilities = np.array(self.gt[str(track_id) + str(timestamp)][1], dtype=np.float32)
 
         ego_center = data['ego_center'] if 'ego_center' in data else np.array(self.cfg['raster_params']['ego_center'])
@@ -829,7 +830,7 @@ class MotionPredictDataset(Dataset):
         im = data["image"].transpose(1, 2, 0)
         im = self.ds.rasterizer.to_rgb(im)
         target_positions_pixels = transform_points(data["target_positions"] + data["centroid"][:2], data["raster_from_world"])
-        draw_trajectory(im, target_positions_pixels, data["target_yaws"], TARGET_POINTS_COLOR)
+        draw_trajectory(im, target_positions_pixels, data["target_yaws"], TARGET_POINTS_COLOR, radius=1)
 
         plt.imshow(im[::-1])
         plt.show()
@@ -1158,7 +1159,9 @@ def create_y_transform_tensor(data, cfg):
 
 
 def reverse_transform_y(y, centroid, world_from_agent, n_modes, run_check=False):
-
+    """
+    Transform agent -> world coordinates
+    """
     if run_check: y_orig = y.clone()
 
     device = y.device
@@ -2042,9 +2045,8 @@ def run_forecast_multi_motion_predict(model_str='', str_network='resnet18',
     return test_dict
 
 
-def test_agent_dataset():
+def test_agent_dataset(str_loader):
     cfg = create_config_multi_train_chopped('')
-    str_loader = 'train_data_loader_10'
     
     dm = LocalDataManager(None)
     rasterizer = build_rasterizer(cfg, dm)
@@ -2053,9 +2055,9 @@ def test_agent_dataset():
     raw_data_file = os.path.splitext(cfg[str_loader]["key"])[0].replace('scenes/', '')
 
     mask = np.load(cfg[str_loader]['mask_path'])["arr_0"]
-    ds = AgentDataset(cfg, data_zarr, rasterizer, agents_mask=mask)#get_dataset(cfg)(raw_data_file, cfg, str_loader, data_zarr, rasterizer, agents_mask=mask)
+    ds = get_dataset(cfg)(raw_data_file, cfg, str_loader, data_zarr, rasterizer, agents_mask=mask) #AgentDataset(cfg, data_zarr, rasterizer, agents_mask=mask)#
         
-    for i in range(30):
+    for i in range(300):
         data = ds[i]
         plt.plot(data['target_positions'][:, 0], data['target_positions'][:, 1])
 
@@ -2064,8 +2066,8 @@ def test_agent_dataset():
 
 
 if __name__ == '__main__':
-    
-    print('FIXED MULTI DATASET, NO AUG, 10 x train_data_loader')
+
+    print('NEW L5KIT, NO AUG, train_data_loader_110')
     run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000,
                                    sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
                                    group_scenes=False,
@@ -2077,7 +2079,7 @@ if __name__ == '__main__':
                                    aug='none',
                                    loader_fn=double_channel_agents_ego_map_transform,
                                    cfg_fn=create_config_multi_train_chopped,
-                                   str_train_loaders=['train_data_loader_100'],
+                                   str_train_loaders=['train_data_loader_110'],
                                    rasterizer_fn=build_rasterizer)
 
     run_forecast_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000,
@@ -2091,7 +2093,7 @@ if __name__ == '__main__':
                                    aug='none',
                                    loader_fn=double_channel_agents_ego_map_transform,
                                    cfg_fn=create_config_multi_train_chopped,
-                                   str_train_loaders=['train_data_loader_100'],
+                                   str_train_loaders=['train_data_loader_110'],
                                    rasterizer_fn=build_rasterizer)
 
     run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000,
@@ -2105,7 +2107,7 @@ if __name__ == '__main__':
                                    aug='none',
                                    loader_fn=double_channel_agents_ego_map_avg_transform,
                                    cfg_fn=create_config_multi_train_chopped,
-                                   str_train_loaders=['train_data_loader_100'],
+                                   str_train_loaders=['train_data_loader_110'],
                                    rasterizer_fn=build_rasterizer)
 
     run_forecast_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000,
@@ -2119,5 +2121,5 @@ if __name__ == '__main__':
                                    aug='none',
                                    loader_fn=double_channel_agents_ego_map_avg_transform,
                                    cfg_fn=create_config_multi_train_chopped,
-                                   str_train_loaders=['train_data_loader_100'],
+                                   str_train_loaders=['train_data_loader_110'],
                                    rasterizer_fn=build_rasterizer)

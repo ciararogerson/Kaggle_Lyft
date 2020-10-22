@@ -188,9 +188,9 @@ def create_config_multi_train_chopped(str_network='', cfg_model_params=None, inp
         },
 
         'train_data_loader_30': {
-            'key': 'scenes/train_full_chopped_30/train_full.zarr',
-            'gt_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_30/gt.csv'),
-            'mask_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_30/mask.npz'),
+            'key': 'scenes/train_full_chopped_30_CF/train_full.zarr',
+            'gt_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_30_CF/gt.csv'),
+            'mask_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_30_CF/mask.npz'),
             'batch_size': batch_size,
             'shuffle': True,
             'num_workers': num_workers,

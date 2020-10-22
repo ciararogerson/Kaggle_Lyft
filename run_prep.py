@@ -87,7 +87,6 @@ def create_chopped_dataset_lite(
     dest_path = zarr_path.parent / f"{zarr_path.stem}_chopped_{num_frames_to_copy}_lite"
     chopped_path = dest_path / zarr_path.name
     gt_path = dest_path / "gt.csv"
-    mask_chopped_path = dest_path / "mask"
 
     if not os.path.exists(gt_path):
         # Create standard mask for the dataset so we can use it to filter out unreliable agents
@@ -106,14 +105,24 @@ def create_chopped_dataset_lite(
         agents_mask_origin = np.asarray(convenience.load(str(agents_mask_path)))
 
         # create chopped dataset
-        chopped_indices_filename = os.path.join(os.path.split(chopped_path)[0], 'chopped_indices.pkl')
-        chopped_indices = check_load(chopped_indices_filename,  zarr_scenes_chop_lite, str(chopped_path), save_to_file=True, args_in=(str(zarr_path), str(chopped_path), num_frames_to_copy, history_num_frames), verbose=True)
-
+        chopped_info_filename = os.path.join(os.path.split(chopped_path)[0], 'chopped_info.pkl')
+        chopped_info = check_load(chopped_info_filename,  zarr_scenes_chop_lite, str(chopped_path), save_to_file=True, args_in=(str(zarr_path), str(chopped_path), num_frames_to_copy, history_num_frames), verbose=True)
+        
         zarr_chopped = ChunkedDataset(str(chopped_path))
         zarr_chopped.open()
 
-        # compute the chopped boolean mask, but also the original one limited to frames of interest for GT csv
-        agents_mask_chop_bool = np.zeros(len(zarr_chopped.agents), dtype=np.bool)
+        # Compute the agent mask for the chopped dataset
+        chopped_agents_mask_path = Path(chopped_path) / f"agents_mask/{th_agent_prob}"
+        if not chopped_agents_mask_path.exists():  
+            select_agents(
+                    zarr_chopped,
+                    th_agent_prob=th_agent_prob,
+                    th_yaw_degree=TH_YAW_DEGREE,
+                    th_extent_ratio=TH_EXTENT_RATIO,
+                    th_distance_av=TH_DISTANCE_AV,
+                )
+
+        # compute original boolean mask limited to frames of interest for GT csv
         agents_mask_orig_bool = np.zeros(len(zarr_dt.agents), dtype=np.bool)
 
         for idx in tqdm(range(len(zarr_dt.scenes)), desc='Extracting masks'):
@@ -126,19 +135,6 @@ def create_chopped_dataset_lite(
             mask = agents_mask_origin[slice_agents_original][:, 1] >= min_frame_future
             agents_mask_orig_bool[slice_agents_original] = mask.copy()
 
-            track_id_original = zarr_dt.agents[slice_agents_original]['track_id']
-
-            if idx in chopped_indices:
-
-                frame_chopped = zarr_chopped.frames[zarr_chopped.scenes[chopped_indices.index(idx)]["frame_index_interval"][-1] - 1]
-                slice_agents_chopped = get_agents_slice_from_frames(frame_chopped)
-
-                track_id_chopped = zarr_chopped.agents[slice_agents_chopped]['track_id']
-                
-                agents_mask_chop_bool[slice_agents_chopped] = mask.copy()
-
-        # store the mask and the GT csv of frames on interest
-        np.savez(str(mask_chopped_path), agents_mask_chop_bool)
         export_zarr_to_csv(zarr_dt, str(gt_path), num_frames_gt, th_agent_prob, agents_mask=agents_mask_orig_bool)
 
     else:
@@ -173,6 +169,7 @@ def zarr_scenes_chop_lite(input_zarr: str, output_zarr: str, num_frames_to_copy:
     # current indices where to copy in the output_dataset
     cur_scene_idx, cur_frame_idx, cur_agent_idx, cur_tl_face_idx = 0, 0, 0, 0
     chopped_indices = []
+    chopped_agents_slice = []
 
     for idx in tqdm(range(len(input_dataset.scenes)), desc="copying"):
 
@@ -184,11 +181,11 @@ def zarr_scenes_chop_lite(input_zarr: str, output_zarr: str, num_frames_to_copy:
 
         if (last_frame_idx - first_frame_idx - num_frames_to_copy) >= 0 and num_frames_to_copy >= history_num_frames:
 
-            chopped_indices.append(idx)
-
             frames = input_dataset.frames[first_frame_idx + num_frames_to_copy - history_num_frames: first_frame_idx + num_frames_to_copy]
             agents = input_dataset.agents[get_agents_slice_from_frames(*frames[[0, -1]])]
             tl_faces = input_dataset.tl_faces[get_tl_faces_slice_from_frames(*frames[[0, -1]])]
+
+            chopped_frame_agents_slice = get_agents_slice_from_frames(frames[-1])
 
             # reset interval relative to our output (subtract current history and add output history)
             scene["frame_index_interval"][0] = cur_frame_idx
@@ -211,11 +208,15 @@ def zarr_scenes_chop_lite(input_zarr: str, output_zarr: str, num_frames_to_copy:
             cur_agent_idx += len(agents)
             cur_tl_face_idx += len(tl_faces)
 
+            # Add to chopped info
+            chopped_indices.append(idx)
+            chopped_agents_slice.append(chopped_frame_agents_slice)
+
         else:
 
             print(' : '.join(('Excluded', str(idx), str(last_frame_idx - first_frame_idx))))
 
-    return chopped_indices
+    return chopped_indices, chopped_agents_slice
 
 
 def create_chopped_dataset_CF(
@@ -396,12 +397,19 @@ def save_chopped_ds_CF(cfg, str_data_loader='train_data_loader', num_frames_to_c
     return chopped_ds_path
 
 
-def save_multi_datasets(config = create_prep_config(), str_data_loader='train_data_loader', num_frames_to_chop=[30, 100, 180]):
+def save_multi_datasets_CF(config = create_prep_config(), str_data_loader='train_data_loader', num_frames_to_chop=[30, 100, 180]):
 
     with ThreadPoolExecutor(max_workers=NUM_WORKERS) as e:
         for n in num_frames_to_chop:
             e.submit(save_chopped_ds_CF, config, str_data_loader, n)
 
+
+def save_multi_datasets_lite(config = create_prep_config(), str_data_loader='train_data_loader', num_frames_to_chop=[30, 100, 180]):
+    """
+    The creation of an agents mask while saving a lite dataset requires Multiprocessing, so we can't put it on a thread
+    """
+    for n in num_frames_to_chop:
+        save_chopped_ds_lite(config, str_data_loader, n)
 
 
 if __name__ == '__main__':
@@ -414,10 +422,10 @@ if __name__ == '__main__':
     """
 
     chop_indices = [10, 30, 50, 70, 90, 110, 130, 150, 180, 200]
-
-    for str_loader in ['train_data_loader', 'val_data_loader']:
+    chop_indices = [30]
+    for str_loader in ['train_data_loader']:
         for n in chop_indices:
             print(' : '.join((str_loader, str(n))))
-            save_multi_datasets(str_data_loader=str_loader, num_frames_to_chop=[n] if not isinstance(n, list) else n)
+            save_multi_datasets_lite(str_data_loader=str_loader, num_frames_to_chop=[n] if not isinstance(n, list) else n)
 
 
