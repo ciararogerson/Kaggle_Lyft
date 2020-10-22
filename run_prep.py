@@ -87,6 +87,7 @@ def create_chopped_dataset_lite(
     dest_path = zarr_path.parent / f"{zarr_path.stem}_chopped_{num_frames_to_copy}_lite"
     chopped_path = dest_path / zarr_path.name
     gt_path = dest_path / "gt.csv"
+    mask_chopped_path = dest_path / "mask"
 
     if not os.path.exists(gt_path):
         # Create standard mask for the dataset so we can use it to filter out unreliable agents
@@ -121,6 +122,23 @@ def create_chopped_dataset_lite(
                     th_extent_ratio=TH_EXTENT_RATIO,
                     th_distance_av=TH_DISTANCE_AV,
                 )
+        agents_mask_chopped = np.asarray(convenience.load(str(chopped_agents_mask_path)))
+
+        # compute chopped boolean mask limited to frames of interest (final frame)
+        agents_mask_chop_bool = np.zeros(len(zarr_chopped.agents), dtype=np.bool)
+
+        for idx in tqdm(range(len(zarr_chopped.scenes)), desc='Extracting chopped masks'):
+
+            scene = zarr_chopped.scenes[idx]
+
+            frame_chopped = zarr_chopped.frames[scene["frame_index_interval"][-1] - 1]
+            slice_agents_chopped = get_agents_slice_from_frames(frame_chopped)
+
+            mask = agents_mask_chopped[slice_agents_chopped][:, 1] >= min_frame_future
+            agents_mask_chop_bool[slice_agents_chopped] = mask.copy()
+
+        # Store the mask
+        np.savez(str(mask_chopped_path), agents_mask_chop_bool)
 
         # compute original boolean mask limited to frames of interest for GT csv
         agents_mask_orig_bool = np.zeros(len(zarr_dt.agents), dtype=np.bool)
