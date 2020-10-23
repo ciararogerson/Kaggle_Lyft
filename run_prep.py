@@ -64,6 +64,7 @@ def create_chopped_dataset_lite(
 ) -> str:
     """
     Create a chopped version of the zarr that can be used as a test set.
+    This version only includes frames from num_frames_to_copy - history_num_frames : num_frames_to_copy.
     This function was used to generate the test set for the competition so that the future GT is not in the data.
 
     Store:
@@ -79,6 +80,7 @@ def create_chopped_dataset_lite(
         num_frames_to_copy (int):  number of frames to copy from the beginning of each scene, others will be discarded
         min_frame_future (int): minimum number of frames that must be available in the future for an agent
         num_frames_gt (int): number of future predictions to store in the GT file
+        history_num_frames (int): number of historic frames to include
 
     Returns:
         str: the parent folder of the new datam
@@ -149,12 +151,13 @@ def create_chopped_dataset_lite(
 
 def zarr_scenes_chop_lite(input_zarr: str, output_zarr: str, num_frames_to_copy: int, history_num_frames: int) -> None:
     """
-    Copy `num_frames_to_keep` from each scene in input_zarr and paste them into output_zarr
+    Copy (num_frames_to_copy - history_num_frames : num_frames_to_copy) from each scene in input_zarr and paste them into output_zarr
 
     Args:
         input_zarr (str): path to the input zarr
         output_zarr (str): path to the output zarr
         num_frames_to_copy (int): how many frames to copy from the start of each scene
+        history_num_frames (int): how many frames to include as a history from the point `num_frames_to_copy`
 
     Returns:
         chopped_indices (list[int])
@@ -225,6 +228,9 @@ def create_chopped_dataset_CF(
     Create a chopped version of the zarr that can be used as a test set.
     This function was used to generate the test set for the competition so that the future GT is not in the data.
 
+    Differs from L5KIT version in that not all scenes need to have > num_frames_to_copy in order for the function to run.
+    In the event that a scene has < num_frames_to_copy that scene is ignored.
+    
     Store:
      - a dataset where each scene has been chopped at `num_frames_to_copy` frames;
      - a mask for agents for those final frames based on the original mask and a threshold on the future_frames;
