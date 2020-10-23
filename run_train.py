@@ -96,7 +96,7 @@ print(' '.join(('USE_CUDA set to', str(USE_CUDA))))
 DEVICE = torch.device("cuda:0" if USE_CUDA else "cpu")
 
 # MULTIPROCESSING
-NUM_WORKERS = 16
+NUM_WORKERS = 10
 CREATE_CACHE = False
 GROUP_SCENES = False  # Whether we should order training/val samples according to single samples from each scene. Legacy.
 
@@ -1287,7 +1287,7 @@ def reverse_transform_y(y, centroid, world_from_agent, n_modes, run_check=False)
     n_future_frames = y.shape[2]
 
     y = torch.cat([y, torch.ones((batch_size, n_modes, n_future_frames, 1)).to(device)], dim=3)
-    y = torch.stack([torch.matmul(world_from_agent, y[:, i].transpose(1, 2)) for i in range(y.shape[1])], dim=1)
+    y = torch.stack([torch.matmul(world_from_agent.to(device), y[:, i].transpose(1, 2)) for i in range(y.shape[1])], dim=1)
     y = y.transpose(2, 3)[:, :, :, :2]
 
     if run_check:
@@ -2176,8 +2176,9 @@ def test_agent_dataset(str_loader):
 
 if __name__ == '__main__':
 
-    print('NEW L5KIT, NO AUG, train_data_loader_110')
-    run_tests_multi_motion_predict(n_epochs=20, in_size=128, batch_size=256, samples_per_epoch=17000,
+    print('NEW L5KIT, NO AUG, train_data_loader_10, 70, 130, 200, BASELINE')
+
+    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000//4,
                                    sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
                                    group_scenes=False,
                                    clsTrainDataset=MultiMotionPredictChoppedDataset,
@@ -2188,25 +2189,11 @@ if __name__ == '__main__':
                                    aug='none',
                                    loader_fn=double_channel_agents_ego_map_transform,
                                    cfg_fn=create_config_multi_train_chopped,
-                                   str_train_loaders=['train_data_loader_110_lite'],
+                                   str_train_loaders=['train_data_loader_10', 'train_data_loader_70', 'train_data_loader_130', 'train_data_loader_200'],
                                    rasterizer_fn=build_rasterizer)
 
-    run_tests_multi_motion_predict(n_epochs=20, in_size=128, batch_size=256, samples_per_epoch=17000,
-                                   sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
-                                   group_scenes=False,
-                                   clsTrainDataset=MultiMotionPredictChoppedDataset,
-                                   clsValDataset=MotionPredictChoppedDataset,
-                                   clsModel=LyftResnet18Transform,
-                                   fit_fn='fit_fastai_transform', val_fn='test_transform',
-                                   loss_fn=neg_log_likelihood_transform,
-                                   aug='none',
-                                   loader_fn=double_channel_agents_ego_map_transform,
-                                   cfg_fn=create_config_multi_train_chopped,
-                                   str_train_loaders=['train_data_loader_110'],
-                                   rasterizer_fn=build_rasterizer)
-
-    """
-    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000,
+    print('NEW L5KIT, NO AUG, train_data_loader_10, 70, 130, 200, AVG HISTORY')
+    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000//4,
                                    sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
                                    group_scenes=False,
                                    clsTrainDataset=MultiMotionPredictChoppedDataset,
@@ -2217,11 +2204,11 @@ if __name__ == '__main__':
                                    aug='none',
                                    loader_fn=double_channel_agents_ego_map_avg_transform,
                                    cfg_fn=create_config_multi_train_chopped,
-                                   str_train_loaders=['train_data_loader_110'],
+                                   str_train_loaders=['train_data_loader_10', 'train_data_loader_70', 'train_data_loader_130', 'train_data_loader_200'],
                                    rasterizer_fn=build_rasterizer)
 
-
-    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000,
+    print('NEW L5KIT, NO AUG, train_data_loader_10, 70, 130, 200, COORDS')
+    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000//4,
                                    sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
                                    group_scenes=False,
                                    clsTrainDataset=MultiMotionPredictChoppedDataset,
@@ -2232,10 +2219,11 @@ if __name__ == '__main__':
                                    aug='none',
                                    loader_fn=double_channel_agents_ego_map_coords,
                                    cfg_fn=create_config_multi_train_chopped,
-                                   str_train_loaders=['train_data_loader_110'],
+                                   str_train_loaders=['train_data_loader_10', 'train_data_loader_70', 'train_data_loader_130', 'train_data_loader_200'],
                                    rasterizer_fn=build_rasterizer)
 
-    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000,
+    print('NEW L5KIT, NO AUG, train_data_loader_10, 70, 130, 200, RELATIVE COORDS')
+    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000//4,
                                    sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
                                    group_scenes=False,
                                    clsTrainDataset=MultiMotionPredictChoppedDataset,
@@ -2246,7 +2234,5 @@ if __name__ == '__main__':
                                    aug='none',
                                    loader_fn=double_channel_agents_ego_map_relativecoords,
                                    cfg_fn=create_config_multi_train_chopped,
-                                   str_train_loaders=['train_data_loader_110'],
+                                   str_train_loaders=['train_data_loader_10', 'train_data_loader_70', 'train_data_loader_130', 'train_data_loader_200'],
                                    rasterizer_fn=build_rasterizer)
-
-    """
