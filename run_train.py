@@ -1073,6 +1073,90 @@ def double_channel_agents_ego_map_dayhour(dataset, idx, args_dict, cfg, str_data
     return [x, transform_matrix, centroid, ego_center], y
 
 
+def double_channel_agents_ego_map_coords(dataset, idx, args_dict, cfg, str_data_loader, info=False, info_dict=None):
+    """
+    double_channel_agents_ego_map tailored to multi mode output model 
+    including centroid and raster_from_world matrix.
+    Includes x/y/distance from ego centre as 3 additional channels
+    """
+    if info:
+        n_input_channels = 8 # Each ego/agent is condensed into two channels, each map is condensed into 1
+        n_output = info_dict['n_modes'] + (info_dict['future_num_frames'] * 3 * info_dict['n_modes']) # n_confs + (future_num_frames * (x, y, yaws) * modes)
+        return n_input_channels, n_output
+
+    data = check_load(get_cache_filename(idx, args_dict, cfg, 'double_channel_agents_ego_map_transform', str_data_loader),
+                      return_idx, idx, CREATE_CACHE, (dataset, idx))
+
+    im = data["image"].transpose(1, 2, 0)
+
+    n, im_map, im_agents_history, im_agents_current, im_ego_history, im_ego_current = split_im(im)
+
+    history_idx = generate_history_idx(n - 1, args_dict['sample_history_num_frames'], args_dict['SHUFFLE'])
+
+    im_map = np.sum(im_map, axis=-1)
+
+    im_agents_history = np.sum(im_agents_history[:, :, history_idx], axis=-1)
+
+    im_ego_history = np.sum(im_ego_history[:, :, history_idx], axis=-1)
+
+    im_coords = generate_coordinate_channels(cfg)
+
+    im_reduced = np.stack([im_agents_history, im_agents_current, im_ego_history, im_ego_current, im_map], axis=-1)
+
+    transforms = make_transform(args_dict['TRANSFORMS']) if 'TRANSFORMS' in args_dict else None
+    im_reduced = augment_img(im_reduced, transforms)
+
+    im_reduced = np.concatenate([im_reduced, im_coords], axis=-1)
+
+    x = numpy_to_torch(im_reduced)
+
+    y, transform_matrix, centroid, ego_center = create_y_transform_tensor(data, cfg)
+
+    return [x, transform_matrix, centroid, ego_center], y
+
+
+def double_channel_agents_ego_map_relativecoords(dataset, idx, args_dict, cfg, str_data_loader, info=False, info_dict=None):
+    """
+    double_channel_agents_ego_map tailored to multi mode output model 
+    including centroid and raster_from_world matrix.
+    Includes x/y relative coordinates as 2 additional channels
+    """
+    if info:
+        n_input_channels = 7 # Each ego/agent is condensed into two channels, each map is condensed into 1
+        n_output = info_dict['n_modes'] + (info_dict['future_num_frames'] * 3 * info_dict['n_modes']) # n_confs + (future_num_frames * (x, y, yaws) * modes)
+        return n_input_channels, n_output
+
+    data = check_load(get_cache_filename(idx, args_dict, cfg, 'double_channel_agents_ego_map_transform', str_data_loader),
+                      return_idx, idx, CREATE_CACHE, (dataset, idx))
+
+    im = data["image"].transpose(1, 2, 0)
+
+    n, im_map, im_agents_history, im_agents_current, im_ego_history, im_ego_current = split_im(im)
+
+    history_idx = generate_history_idx(n - 1, args_dict['sample_history_num_frames'], args_dict['SHUFFLE'])
+
+    im_map = np.sum(im_map, axis=-1)
+
+    im_agents_history = np.sum(im_agents_history[:, :, history_idx], axis=-1)
+
+    im_ego_history = np.sum(im_ego_history[:, :, history_idx], axis=-1)
+
+    im_coords = generate_relative_coordinate_channels(cfg)
+
+    im_reduced = np.stack([im_agents_history, im_agents_current, im_ego_history, im_ego_current, im_map], axis=-1)
+
+    transforms = make_transform(args_dict['TRANSFORMS']) if 'TRANSFORMS' in args_dict else None
+    im_reduced = augment_img(im_reduced, transforms)
+
+    im_reduced = np.concatenate([im_reduced, im_coords], axis=-1)
+
+    x = numpy_to_torch(im_reduced)
+
+    y, transform_matrix, centroid, ego_center = create_y_transform_tensor(data, cfg)
+
+    return [x, transform_matrix, centroid, ego_center], y
+
+
 def split_im(im):
     """
     Split image into 
@@ -1125,6 +1209,32 @@ def generate_history_idx(n, history_num_frames, shuffle=False):
         n_history = n // history_num_frames
         history_idx = list(range(0, n, n_history))
     return sorted(history_idx[:n])
+
+
+def generate_coordinate_channels(cfg):
+
+    h = cfg['raster_params']['raster_size'][0]
+
+    ch_h, ch_v = np.meshgrid(np.arange(h), np.arange(h))
+    ch_c = np.sqrt((ch_h - cfg['raster_params']['ego_center'][0]*h)**2 + (ch_v - cfg['raster_params']['ego_center'][1]*h)**2)
+    
+    coords = np.stack([ch_v, ch_h, ch_c], axis=-1)
+
+    return coords
+
+
+def generate_relative_coordinate_channels(cfg):
+
+    h = cfg['raster_params']['raster_size'][0]
+
+    ch_h, ch_v = np.meshgrid(np.arange(h), np.arange(h))
+
+    h_offset = cfg['raster_params']['ego_center'][0] * h
+    v_offset = cfg['raster_params']['ego_center'][1] * h
+    
+    coords = np.stack([ch_v - v_offset, ch_h - h_offset], axis=-1)
+
+    return coords
 
 
 def create_y_transform_tensor(data, cfg):
@@ -1362,7 +1472,6 @@ def neg_log_likelihood_transform(pred, truth, calctype='transform', reduction='m
                                             pred_transform.reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :, :2],  # ignore yaws
                                             conf.reshape(batch_size, n_modes), 
                                             mask.reshape(batch_size, future_num_frames, -1)[:, :, 0]) 
-        nll = nll / 4 # 2 metres per pixel * 2
     else:
         nll = torch.Tensor([0]).float()
 
@@ -2068,7 +2177,21 @@ def test_agent_dataset(str_loader):
 if __name__ == '__main__':
 
     print('NEW L5KIT, NO AUG, train_data_loader_110')
-    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000,
+    run_tests_multi_motion_predict(n_epochs=20, in_size=128, batch_size=256, samples_per_epoch=17000,
+                                   sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
+                                   group_scenes=False,
+                                   clsTrainDataset=MultiMotionPredictChoppedDataset,
+                                   clsValDataset=MotionPredictChoppedDataset,
+                                   clsModel=LyftResnet18Transform,
+                                   fit_fn='fit_fastai_transform', val_fn='test_transform',
+                                   loss_fn=neg_log_likelihood_transform,
+                                   aug='none',
+                                   loader_fn=double_channel_agents_ego_map_transform,
+                                   cfg_fn=create_config_multi_train_chopped,
+                                   str_train_loaders=['train_data_loader_110_lite'],
+                                   rasterizer_fn=build_rasterizer)
+
+    run_tests_multi_motion_predict(n_epochs=20, in_size=128, batch_size=256, samples_per_epoch=17000,
                                    sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
                                    group_scenes=False,
                                    clsTrainDataset=MultiMotionPredictChoppedDataset,
@@ -2082,20 +2205,7 @@ if __name__ == '__main__':
                                    str_train_loaders=['train_data_loader_110'],
                                    rasterizer_fn=build_rasterizer)
 
-    run_forecast_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000,
-                                   sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
-                                   group_scenes=False,
-                                   clsTrainDataset=MultiMotionPredictChoppedDataset,
-                                   clsValDataset=MotionPredictChoppedDataset,
-                                   clsModel=LyftResnet18Transform,
-                                   fit_fn='fit_fastai_transform', val_fn='test_transform',
-                                   loss_fn=neg_log_likelihood_transform,
-                                   aug='none',
-                                   loader_fn=double_channel_agents_ego_map_transform,
-                                   cfg_fn=create_config_multi_train_chopped,
-                                   str_train_loaders=['train_data_loader_110'],
-                                   rasterizer_fn=build_rasterizer)
-
+    """
     run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000,
                                    sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
                                    group_scenes=False,
@@ -2110,7 +2220,8 @@ if __name__ == '__main__':
                                    str_train_loaders=['train_data_loader_110'],
                                    rasterizer_fn=build_rasterizer)
 
-    run_forecast_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000,
+
+    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000,
                                    sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
                                    group_scenes=False,
                                    clsTrainDataset=MultiMotionPredictChoppedDataset,
@@ -2119,7 +2230,23 @@ if __name__ == '__main__':
                                    fit_fn='fit_fastai_transform', val_fn='test_transform',
                                    loss_fn=neg_log_likelihood_transform,
                                    aug='none',
-                                   loader_fn=double_channel_agents_ego_map_avg_transform,
+                                   loader_fn=double_channel_agents_ego_map_coords,
                                    cfg_fn=create_config_multi_train_chopped,
                                    str_train_loaders=['train_data_loader_110'],
                                    rasterizer_fn=build_rasterizer)
+
+    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000,
+                                   sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
+                                   group_scenes=False,
+                                   clsTrainDataset=MultiMotionPredictChoppedDataset,
+                                   clsValDataset=MotionPredictChoppedDataset,
+                                   clsModel=LyftResnet18Transform,
+                                   fit_fn='fit_fastai_transform', val_fn='test_transform',
+                                   loss_fn=neg_log_likelihood_transform,
+                                   aug='none',
+                                   loader_fn=double_channel_agents_ego_map_relativecoords,
+                                   cfg_fn=create_config_multi_train_chopped,
+                                   str_train_loaders=['train_data_loader_110'],
+                                   rasterizer_fn=build_rasterizer)
+
+    """

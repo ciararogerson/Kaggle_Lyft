@@ -247,6 +247,16 @@ def create_config_multi_train_chopped(str_network='', cfg_model_params=None, inp
             'samples_per_epoch': samples_per_epoch
         },
 
+        'train_data_loader_110_lite': {
+            'key': 'scenes/train_full_chopped_110_lite/train_full.zarr',
+            'gt_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_110_lite/gt.csv'),
+            'mask_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_110_lite/mask.npz'),
+            'batch_size': batch_size,
+            'shuffle': True,
+            'num_workers': num_workers,
+            'samples_per_epoch': samples_per_epoch
+        },
+
         'train_data_loader_130': {
             'key': 'scenes/train_full_chopped_130_CF/train_full.zarr',
             'gt_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_130_CF/gt.csv'),
