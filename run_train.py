@@ -87,7 +87,7 @@ torch.backends.cudnn.benchmark = False
 # SET UP / GLOBALS
 ######################################
 
-DEBUG = False
+DEBUG = True
 
 # GPU
 USE_MULTI_GPU = True
@@ -719,6 +719,7 @@ class MotionPredictDataset(Dataset):
         self.fn_create = fn_create  # Function that takes a filename input and creates a model input
         
         self.group_scenes = self.args_dict['group_scenes'] if 'group_scenes' in self.args_dict else False
+        self.weight_by_agent_count = self.args_dict['weight_by_agent_count'] if 'weight_by_agent_count' in self.args_dict else 0
 
         self.setup()
 
@@ -770,40 +771,85 @@ class MotionPredictDataset(Dataset):
         """
         self.current_idx = 0
 
-        if not self.group_scenes or self.str_loader == 'test_data_loader':
+        if self.str_loader in ['test_data_loader', 'val_data_loader']:
 
-            self.all_idx = list(range(len(self.ds)))
-            if self.shuffle: random.shuffle(self.all_idx)
+            self.set_all_idx_default()
 
+        elif self.group_scenes:
+
+            self.set_all_idx_group_scenes()
+
+        elif self.weight_by_agent_count > 0:
+
+            self.set_all_idx_weight_by_agent_count()
+        
         else:
 
-            def grp_range(a):
-                idx = a.cumsum()
-                id_arr = np.ones(idx[-1],dtype=int)
-                id_arr[0] = 0
-                id_arr[idx[:-1]] = -a[:-1]+1
-                return id_arr.cumsum()
+            self.set_all_idx_default()
 
-            # First shuffle the indices to ensure that there is no order in which the scene samples occur
-            idx = list(range(len(self.ds)))
-            random.shuffle(idx)
-
-            print('Shuffling scene indices...')
-            self.ds.scene_indices = [self.ds.scene_indices[i] for i in tqdm(idx)]
-            self.ds.frame_indices = [self.ds.frame_indices[i] for i in tqdm(idx)]
-            self.ds.timestamps = [self.ds.timestamps[i] for i in tqdm(idx)]
-            self.ds.track_ids = [self.ds.track_ids[i] for i in tqdm(idx)]
-
-            # Within each scene, number the agents/frames 0 -> n
-            count = np.unique(self.ds.scene_indices, return_counts=1)[1]
-            scene_cumcount = grp_range(count)[np.argsort(self.ds.scene_indices, kind='mergesort').argsort(kind='mergesort')]  # Use mergesort to guarantee same results each time
-
-            # Create all_idx by selecting one agent/frame from each scene consecutively
-            cumcounts = range(int(scene_cumcount.max()))
-            self.all_idx = list(np.concatenate([np.argwhere(scene_cumcount == i).reshape(-1, ) for i in tqdm(cumcounts)]))
        
+    def set_all_idx_default(self):
+
+        self.all_idx = list(range(len(self.ds)))
+        if self.shuffle: random.shuffle(self.all_idx)
+
+
+    def set_all_idx_group_scenes(self):
+
+        def grp_range(a):
+            idx = a.cumsum()
+            id_arr = np.ones(idx[-1],dtype=int)
+            id_arr[0] = 0
+            id_arr[idx[:-1]] = -a[:-1]+1
+            return id_arr.cumsum()
+
+        # First shuffle the indices to ensure that there is no order in which the scene samples occur
+        idx = list(range(len(self.ds)))
+        random.shuffle(idx)
+
+        print('Shuffling scene indices...')
+        self.ds.scene_indices = [self.ds.scene_indices[i] for i in tqdm(idx)]
+        self.ds.frame_indices = [self.ds.frame_indices[i] for i in tqdm(idx)]
+        self.ds.timestamps = [self.ds.timestamps[i] for i in tqdm(idx)]
+        self.ds.track_ids = [self.ds.track_ids[i] for i in tqdm(idx)]
+
+        # Within each scene, number the agents/frames 0 -> n
+        count = np.unique(self.ds.scene_indices, return_counts=1)[1]
+        scene_cumcount = grp_range(count)[np.argsort(self.ds.scene_indices, kind='mergesort').argsort(kind='mergesort')]  # Use mergesort to guarantee same results each time
+
+        # Create all_idx by selecting one agent/frame from each scene consecutively
+        cumcounts = range(int(scene_cumcount.max()))
+        self.all_idx = list(np.concatenate([np.argwhere(scene_cumcount == i).reshape(-1, ) for i in tqdm(cumcounts)]))
+
+
+    def set_all_idx_weight_by_agent_count(self):
+        
+        # Calculate the count for each frame index in the dataset
+        frame_bincounts = np.bincount(self.ds.frame_indices)
+        agent_counts = frame_bincounts[self.ds.frame_indices]
+        
+        # Select a sample of the number of unique agents from each group of agent_count
+        # For e.g. if there are 3000 samples where there are two agents in the frame, sample 1500 of these 3000 agents
+        all_idx = []
+        for agent_count in sorted(np.unique(agent_counts)):
+
+            _idx = np.argwhere(agent_counts==agent_count).reshape(-1,)
+
+            select_count = int(len(_idx) * min(1, (self.weight_by_agent_count/agent_count)))
+
+            all_idx.append(np.random.choice(_idx, size=select_count))
+
+        all_idx = np.concatenate(all_idx)
+
+        random.shuffle(all_idx)
+
+        self.all_idx = all_idx
+
+        if DEBUG: print(' : '.join(('Reset all_idx, total sample length', str(len(self.all_idx)), 'from', str(len(self.ds)))))
+
 
     def map_index(self, index):
+
         if self.current_idx + index >= len(self.all_idx):
             self.set_all_idx()
         return self.all_idx[self.current_idx + index]
@@ -836,49 +882,9 @@ class MotionPredictDataset(Dataset):
         plt.show()
 
 
-class MotionPredictChoppedDataset(MotionPredictDataset):
+class MultiMotionPredictDataset(Dataset):
     """
-    Adapting MotionPredictDataset for use with a chopped dataset
-    where we can only draw from frame 100 of each scene, and ground truth 
-    needs to be mapped from csv
-    """
-
-    def __init__(self,
-                 cfg,
-                 args_dict={},
-                 str_loader='train_data_loader',
-                 fn_rasterizer=build_rasterizer,
-                 fn_create=None):
-
-        super(MotionPredictChoppedDataset, self).__init__(cfg, args_dict, str_loader, fn_rasterizer, fn_create)
-
-        self.set_all_idx()
-
-        # Reset sample_size to reflect the reduction of the dataset to every frame 100 only.
-        self.sample_size = min(self.cfg[self.str_loader]['samples_per_epoch'], len(self.all_idx))
-
-    def set_all_idx(self):
-        """
-        Reset sample indexes for the whole dataset
-        """
-        if DEBUG: print('Resetting all_idx...')
-
-        self.current_idx = 0
-
-        # all_idx only holds every 100th frame
-        #assert np.all(np.equal(np.mod(np.array(self.ds.frame_indices) + 1, 100), 0))
-        #self.all_idx = np.argwhere(np.equal(np.mod(np.array(self.ds.frame_indices) + 1, 50), 0)).reshape(-1,)
-        # Chopped datasets are reduced to target frames only, so no need to reduce again:
-        self.all_idx = list(range(len(self.ds.frame_indices)))
-
-        if self.shuffle: random.shuffle(self.all_idx)
-
-        #print('Chopped dataset size: ' + str(len(self.all_idx)))
-
-
-class MultiMotionPredictChoppedDataset(Dataset):
-    """
-    Holder for multiple MotionPredictChoppedDatasets
+    Holder for multiple MotionPredictDatasets
     """
 
     def __init__(self,
@@ -899,9 +905,9 @@ class MultiMotionPredictChoppedDataset(Dataset):
 
     def setup(self):
 
-        assert isinstance(self.str_loader, (list, tuple)), 'str_loader must be a list/tuple for use in MultiMotionPredictChoppedDataset '
+        assert isinstance(self.str_loader, (list, tuple)), 'str_loader must be a list/tuple for use in MultiMotionPredictDataset '
 
-        self.dataset_list = [MotionPredictChoppedDataset(self.cfg, self.args_dict, str_loader, self.fn_rasterizer, self.fn_create) for str_loader in self.str_loader]
+        self.dataset_list = [MotionPredictDataset(self.cfg, self.args_dict, str_loader, self.fn_rasterizer, self.fn_create) for str_loader in self.str_loader]
 
         self.dataset_sizes = [len(dataset) for dataset in self.dataset_list]
 
@@ -1900,7 +1906,7 @@ def fit_multitrain_motion_predict(n_epochs, train_args_dict, val_args_dict,
 # RUN HELPERS
 ##############################################
 
-def setup_args_dicts(clsTrainDataset, clsValDataset, aug, str_network, in_size, pixel_size, ego_center, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes):
+def setup_args_dicts(clsTrainDataset, clsValDataset, aug, str_network, in_size, pixel_size, ego_center, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count):
 
     transforms = []
 
@@ -1928,6 +1934,7 @@ def setup_args_dicts(clsTrainDataset, clsValDataset, aug, str_network, in_size, 
                         'n_modes': n_modes,
                         'max_agents': max_agents,
                         'group_scenes': group_scenes,
+                        'weight_by_agent_count': weight_by_agent_count,
                         'clsDataset': clsTrainDataset,
                         'SHUFFLE': True}
 
@@ -1950,7 +1957,7 @@ def setup_args_dicts(clsTrainDataset, clsValDataset, aug, str_network, in_size, 
     return train_args_dict, val_args_dict
 
 
-def setup_test_args_dict(clsDataset, aug, str_network, in_size, pixel_size, ego_center, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes):
+def setup_test_args_dict(clsDataset, aug, str_network, in_size, pixel_size, ego_center, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count):
 
     test_args_dict = {'INPUT_SIZE': in_size,
                         'PIXEL_SIZE': pixel_size,
@@ -1971,7 +1978,7 @@ def setup_test_args_dict(clsDataset, aug, str_network, in_size, pixel_size, ego_
     return test_args_dict
 
 
-def create_base_filename(clsTrainDataset, clsValDataset, clsModel, val_fn, rasterizer_fn, loader_fn,  cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center, n_epochs, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, str_network, aug, model_str):
+def create_base_filename(clsTrainDataset, clsValDataset, clsModel, val_fn, rasterizer_fn, loader_fn,  cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center, n_epochs, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count, str_network, aug, model_str):
 
     str_train_dataset = str(clsTrainDataset).split('.')[-1].split("'")[0]
     str_val_dataset = str(clsValDataset).split('.')[-1].split("'")[0]
@@ -1987,26 +1994,27 @@ def create_base_filename(clsTrainDataset, clsValDataset, clsModel, val_fn, raste
     #base_filename = '_'.join((val_fn, str_train_dataset, str_val_dataset, str_model, str_rasterizer_fn, str_loader_fn, str_cfg_fn, str_loss_fn, str(in_size), str_pixel_size, str_ego_center, str(n_epochs),str(batch_size), str(samples_per_epoch), str(sample_history_num_frames), str(history_num_frames), str(future_num_frames), str(n_modes), str_network, fit_fn, aug, model_str, '.pkl'))
     #base_filename = '_'.join((val_fn, str_model, str_rasterizer_fn, str_loader_fn, str_cfg_fn, str_loss_fn, str(in_size), str_pixel_size, str_ego_center, str(n_epochs),str(batch_size), str(samples_per_epoch), str(sample_history_num_frames), str(history_num_frames), str(future_num_frames), str(n_modes), str(group_scenes), str_network, fit_fn, aug, model_str, '.pkl'))
     #base_filename = '_'.join((val_fn, str_model, str_loader_fn, str_cfg_fn, str_loss_fn, str(in_size), str_pixel_size, str_ego_center, str(n_epochs),str(batch_size), str(samples_per_epoch), str(sample_history_num_frames), str(history_num_frames), str(future_num_frames), str(n_modes), str(group_scenes), str_network, fit_fn, aug, model_str, '.pkl'))
-    base_filename = '_'.join((val_fn, str_model, str_loader_fn, str_cfg_fn, str_loss_fn, str(in_size), str_pixel_size, str_ego_center, str(n_epochs),str(batch_size), str(samples_per_epoch), str(sample_history_num_frames), str(history_num_frames), str(future_num_frames), str(n_modes), str(max_agents), str_network, fit_fn, aug, model_str, '.pkl'))
+    #base_filename = '_'.join((val_fn, str_model, str_loader_fn, str_cfg_fn, str_loss_fn, str(in_size), str_pixel_size, str_ego_center, str(n_epochs),str(batch_size), str(samples_per_epoch), str(sample_history_num_frames), str(history_num_frames), str(future_num_frames), str(n_modes), str(max_agents), str_network, fit_fn, aug, model_str, '.pkl'))
+    base_filename = '_'.join((val_fn, str_model, str_loader_fn, str_cfg_fn, str_loss_fn, str(in_size), str(n_epochs),str(batch_size), str(samples_per_epoch), str(sample_history_num_frames), str(history_num_frames), str(future_num_frames), str(n_modes), str(max_agents), str(weight_by_agent_count), str_network, fit_fn, aug, model_str, '.pkl'))
 
     return base_filename
     
 
-def create_val_dict_filepath(clsTrainDataset, clsValDataset, clsModel, val_fn, rasterizer_fn, loader_fn,  cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center, n_epochs, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, str_network, aug, model_str):
+def create_val_dict_filepath(clsTrainDataset, clsValDataset, clsModel, val_fn, rasterizer_fn, loader_fn,  cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center, n_epochs, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count, str_network, aug, model_str):
 
-    base_filename = create_base_filename(clsTrainDataset, clsValDataset, clsModel, val_fn, rasterizer_fn, loader_fn,  cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center, n_epochs, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, str_network, aug, model_str)
+    base_filename = create_base_filename(clsTrainDataset, clsValDataset, clsModel, val_fn, rasterizer_fn, loader_fn,  cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center, n_epochs, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count, str_network, aug, model_str)
 
     return os.path.join(DATA_DIR, 'val_' + base_filename)
 
     
-def create_test_dict_filepath(clsTrainDataset, clsValDataset, clsModel, val_fn, rasterizer_fn, loader_fn,  cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center, n_epochs, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, str_network, aug, model_str):
+def create_test_dict_filepath(clsTrainDataset, clsValDataset, clsModel, val_fn, rasterizer_fn, loader_fn,  cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center, n_epochs, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count, str_network, aug, model_str):
 
-    base_filename = create_base_filename(clsTrainDataset, clsValDataset, clsModel, val_fn, rasterizer_fn, loader_fn,  cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center, n_epochs, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, str_network, aug, model_str)
+    base_filename = create_base_filename(clsTrainDataset, clsValDataset, clsModel, val_fn, rasterizer_fn, loader_fn,  cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center, n_epochs, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count, str_network, aug, model_str)
 
     return os.path.join(DATA_DIR, 'test_' + base_filename)
 
 
-def create_model_checkpoint_path(clsTrainDataset, clsValDataset, clsModel, val_fn, rasterizer_fn, loader_fn, cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center, n_epochs, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, str_network, aug, model_str):
+def create_model_checkpoint_path(clsTrainDataset, clsValDataset, clsModel, val_fn, rasterizer_fn, loader_fn, cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center, n_epochs, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count, str_network, aug, model_str):
 
     str_train_dataset = str(clsTrainDataset).split('.')[-1].split("'")[0]
     str_val_dataset = str(clsValDataset).split('.')[-1].split("'")[0]
@@ -2020,7 +2028,8 @@ def create_model_checkpoint_path(clsTrainDataset, clsValDataset, clsModel, val_f
     str_ego_center = '_'.join(([str(i) for i in ego_center]))
 
     #model_filename = '_'.join(('model_checkpoint', str_train_dataset, str_val_dataset, str_model, str_rasterizer_fn, str_loader_fn, str_cfg_fn, str_loss_fn, str(in_size), str_pixel_size, str_ego_center, str(n_epochs),str(batch_size), str(samples_per_epoch), str(sample_history_num_frames), str(history_num_frames), str(future_num_frames), str(n_modes), str_network, fit_fn, aug, model_str, '.pth'))
-    model_filename = '_'.join(('chkpt', str_model, str_rasterizer_fn, str_loader_fn, str_cfg_fn, str_loss_fn, str(in_size), str_pixel_size, str_ego_center, str(n_epochs),str(batch_size), str(samples_per_epoch), str(sample_history_num_frames), str(history_num_frames), str(future_num_frames), str(n_modes), str(max_agents), str_network, fit_fn, aug, model_str, '.pth'))
+    #model_filename = '_'.join(('chkpt', str_model, str_rasterizer_fn, str_loader_fn, str_cfg_fn, str_loss_fn, str(in_size), str_pixel_size, str_ego_center, str(n_epochs),str(batch_size), str(samples_per_epoch), str(sample_history_num_frames), str(history_num_frames), str(future_num_frames), str(n_modes), str(max_agents), str_network, fit_fn, aug, model_str, '.pth'))
+    model_filename = '_'.join(('chkpt', str_model, str_rasterizer_fn, str_loader_fn, str_cfg_fn, str_loss_fn, str(in_size), str(n_epochs),str(batch_size), str(samples_per_epoch), str(sample_history_num_frames), str(history_num_frames), str(future_num_frames), str(n_modes), str(max_agents), str(weight_by_agent_count), str_network, fit_fn, aug, model_str, '.pth'))
     model_filename = model_filename.replace('-', '_')
 
     return os.path.join(MODEL_DIR, model_filename)
@@ -2051,9 +2060,10 @@ def create_submission(submission_dict, submission_dict_filepath):
 
 def run_tests_multi_motion_predict(model_str='', str_network='resnet18',
                             n_epochs=20, in_size=224, pixel_size=[0.5, 0.5], ego_center=[0.25, 0.5], batch_size=24, samples_per_epoch=17000, lr=3e-4, 
-                            sample_history_num_frames=10, history_num_frames=10, future_num_frames=50, n_modes=3, max_agents=40, group_scenes=False,
+                            sample_history_num_frames=10, history_num_frames=10, future_num_frames=50, n_modes=3, max_agents=40, 
+                            group_scenes=False, weight_by_agent_count=False,
                             fit_fn='fit_transform', val_fn='test_transform', aug='none', 
-                            clsTrainDataset=MotionPredictChoppedDataset, clsValDataset=MotionPredictChoppedDataset,
+                            clsTrainDataset=MotionPredictDataset, clsValDataset=MotionPredictDataset,
                             clsModel=LyftResnet18Transform, init_model_weights_path=None, cfg_model_params=None,
                             rasterizer_fn=build_rasterizer,
                             loss_fn=neg_log_likelihood_transform, 
@@ -2064,7 +2074,7 @@ def run_tests_multi_motion_predict(model_str='', str_network='resnet18',
                                                  loader_fn, cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center,
                                                  n_epochs, batch_size, samples_per_epoch, sample_history_num_frames,
                                                  history_num_frames, future_num_frames, n_modes, max_agents,
-                                                 group_scenes, str_network, aug, model_str)
+                                                 group_scenes, weight_by_agent_count, str_network, aug, model_str)
 
 
     if not os.path.exists(val_dict_filepath):
@@ -2072,10 +2082,10 @@ def run_tests_multi_motion_predict(model_str='', str_network='resnet18',
         print(' : '.join(('Training model', str_network, 'for input size', str(in_size), 'batch_size', str(batch_size), 'augmentation', aug, 'val_file', os.path.split(val_dict_filepath)[-1])))
 
         # Set up args_dict inputs
-        train_args_dict, val_args_dict = setup_args_dicts(clsTrainDataset, clsValDataset, aug, str_network, in_size, pixel_size, ego_center, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes)
+        train_args_dict, val_args_dict = setup_args_dicts(clsTrainDataset, clsValDataset, aug, str_network, in_size, pixel_size, ego_center, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count)
 
         # Fit / evaluate model
-        model_checkpoint_path = create_model_checkpoint_path(clsTrainDataset, clsValDataset, clsModel, val_fn, rasterizer_fn, loader_fn, cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center, n_epochs, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, str_network, aug, model_str)
+        model_checkpoint_path = create_model_checkpoint_path(clsTrainDataset, clsValDataset, clsModel, val_fn, rasterizer_fn, loader_fn, cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center, n_epochs, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count, str_network, aug, model_str)
 
         val_dicts, net = fit_multitrain_motion_predict(n_epochs, train_args_dict, val_args_dict,
                                                     init_model_weights_path=init_model_weights_path,
@@ -2104,10 +2114,11 @@ def run_tests_multi_motion_predict(model_str='', str_network='resnet18',
 
 def run_forecast_multi_motion_predict(model_str='', str_network='resnet18',
                                     n_epochs=20, in_size=224, pixel_size=[0.5, 0.5], ego_center=[0.25, 0.5], batch_size=24, samples_per_epoch=17000, lr=3e-4, 
-                                    sample_history_num_frames=10, history_num_frames=10, future_num_frames=50, n_modes=3, max_agents=40, group_scenes=False,
+                                    sample_history_num_frames=10, history_num_frames=10, future_num_frames=50, n_modes=3, max_agents=40, 
+                                    group_scenes=False, weight_by_agent_count=False,
                                     fit_fn='fit_transform', val_fn='test_transform', aug='none', 
-                                    clsTrainDataset=MotionPredictChoppedDataset, 
-                                    clsValDataset=MotionPredictChoppedDataset,
+                                    clsTrainDataset=MotionPredictDataset, 
+                                    clsValDataset=MotionPredictDataset,
                                     clsTestDataset=MotionPredictDataset,
                                     clsModel=LyftResnet18Transform,
                                     init_model_weights_path=None,
@@ -2117,17 +2128,17 @@ def run_forecast_multi_motion_predict(model_str='', str_network='resnet18',
                                     str_train_loaders=['train_data_loader_100', 'train_data_loader_30'],
                                     loader_fn=double_channel_agents_ego_map_transform, cfg_fn=create_config_multi_train_chopped):
         
-    test_dict_filepath = create_test_dict_filepath(clsTrainDataset, clsValDataset, clsModel, val_fn, rasterizer_fn, loader_fn, cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center, n_epochs, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, str_network, aug, model_str)
+    test_dict_filepath = create_test_dict_filepath(clsTrainDataset, clsValDataset, clsModel, val_fn, rasterizer_fn, loader_fn, cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center, n_epochs, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count, str_network, aug, model_str)
     
     if not os.path.exists(test_dict_filepath):
 
         print(' : '.join(('Forecasting for model', str_network, 'for input size', str(in_size), 'batch_size', str(batch_size), 'augmentation', aug, 'test_file', os.path.split(test_dict_filepath)[-1])))
 
         # Set up args_dict inputs
-        test_args_dict = setup_test_args_dict(clsTestDataset, aug, str_network, in_size, pixel_size, ego_center, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes)
+        test_args_dict = setup_test_args_dict(clsTestDataset, aug, str_network, in_size, pixel_size, ego_center, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count)
 
         # Fit / evaluate model
-        model_checkpoint_path = create_model_checkpoint_path(clsTrainDataset, clsValDataset, clsModel, val_fn, rasterizer_fn, loader_fn, cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center, n_epochs, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, str_network, aug, model_str)
+        model_checkpoint_path = create_model_checkpoint_path(clsTrainDataset, clsValDataset, clsModel, val_fn, rasterizer_fn, loader_fn, cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center, n_epochs, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count, str_network, aug, model_str)
 
         test_dicts, net = fit_multitrain_motion_predict(n_epochs, test_args_dict, test_args_dict,
                                                         init_model_weights_path=init_model_weights_path,
@@ -2176,13 +2187,13 @@ def test_agent_dataset(str_loader):
 
 if __name__ == '__main__':
 
-    print('NEW L5KIT, NO AUG, train_data_loader_10, 70, 130, 200, BASELINE')
+    print('NEW L5KIT, NO AUG, train_data_loader_10, 70, 130, 200, WEIGHT BY AGENT COUNT')
 
     run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000//4,
                                    sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
-                                   group_scenes=False,
-                                   clsTrainDataset=MultiMotionPredictChoppedDataset,
-                                   clsValDataset=MotionPredictChoppedDataset,
+                                   group_scenes=False, weight_by_agent_count=1,
+                                   clsTrainDataset=MultiMotionPredictDataset,
+                                   clsValDataset=MotionPredictDataset,
                                    clsModel=LyftResnet18Transform,
                                    fit_fn='fit_fastai_transform', val_fn='test_transform',
                                    loss_fn=neg_log_likelihood_transform,
@@ -2192,47 +2203,4 @@ if __name__ == '__main__':
                                    str_train_loaders=['train_data_loader_10', 'train_data_loader_70', 'train_data_loader_130', 'train_data_loader_200'],
                                    rasterizer_fn=build_rasterizer)
 
-    print('NEW L5KIT, NO AUG, train_data_loader_10, 70, 130, 200, AVG HISTORY')
-    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000//4,
-                                   sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
-                                   group_scenes=False,
-                                   clsTrainDataset=MultiMotionPredictChoppedDataset,
-                                   clsValDataset=MotionPredictChoppedDataset,
-                                   clsModel=LyftResnet18Transform,
-                                   fit_fn='fit_fastai_transform', val_fn='test_transform',
-                                   loss_fn=neg_log_likelihood_transform,
-                                   aug='none',
-                                   loader_fn=double_channel_agents_ego_map_avg_transform,
-                                   cfg_fn=create_config_multi_train_chopped,
-                                   str_train_loaders=['train_data_loader_10', 'train_data_loader_70', 'train_data_loader_130', 'train_data_loader_200'],
-                                   rasterizer_fn=build_rasterizer)
 
-    print('NEW L5KIT, NO AUG, train_data_loader_10, 70, 130, 200, COORDS')
-    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000//4,
-                                   sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
-                                   group_scenes=False,
-                                   clsTrainDataset=MultiMotionPredictChoppedDataset,
-                                   clsValDataset=MotionPredictChoppedDataset,
-                                   clsModel=LyftResnet18Transform,
-                                   fit_fn='fit_fastai_transform', val_fn='test_transform',
-                                   loss_fn=neg_log_likelihood_transform,
-                                   aug='none',
-                                   loader_fn=double_channel_agents_ego_map_coords,
-                                   cfg_fn=create_config_multi_train_chopped,
-                                   str_train_loaders=['train_data_loader_10', 'train_data_loader_70', 'train_data_loader_130', 'train_data_loader_200'],
-                                   rasterizer_fn=build_rasterizer)
-
-    print('NEW L5KIT, NO AUG, train_data_loader_10, 70, 130, 200, RELATIVE COORDS')
-    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000//4,
-                                   sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
-                                   group_scenes=False,
-                                   clsTrainDataset=MultiMotionPredictChoppedDataset,
-                                   clsValDataset=MotionPredictChoppedDataset,
-                                   clsModel=LyftResnet18Transform,
-                                   fit_fn='fit_fastai_transform', val_fn='test_transform',
-                                   loss_fn=neg_log_likelihood_transform,
-                                   aug='none',
-                                   loader_fn=double_channel_agents_ego_map_relativecoords,
-                                   cfg_fn=create_config_multi_train_chopped,
-                                   str_train_loaders=['train_data_loader_10', 'train_data_loader_70', 'train_data_loader_130', 'train_data_loader_200'],
-                                   rasterizer_fn=build_rasterizer)
