@@ -87,7 +87,7 @@ torch.backends.cudnn.benchmark = False
 # SET UP / GLOBALS
 ######################################
 
-DEBUG = True
+DEBUG = False
 
 # GPU
 USE_MULTI_GPU = True
@@ -824,12 +824,13 @@ class MotionPredictDataset(Dataset):
 
     def set_all_idx_weight_by_agent_count(self):
         
-        # Calculate the count for each frame index in the dataset
+        # Calculate the count for each frame index in the datasetd = number of agents in that frame
         frame_bincounts = np.bincount(self.ds.frame_indices)
         agent_counts = frame_bincounts[self.ds.frame_indices]
         
-        # Select a sample of the number of unique agents from each group of agent_count
-        # For e.g. if there are 3000 samples where there are two agents in the frame, sample 1500 of these 3000 agents
+        # Select a sample from each agent_count group
+        # For e.g. if there are 3000 samples where there are two agents in the frame and self.weight_by_agent_count = 1, we sample 1500 of these 3000 agents
+        # Use weight_by_agent_count to govern how agressively we sub-sample: The lower the number the more we downweight frames with many agents.
         all_idx = []
         for agent_count in sorted(np.unique(agent_counts)):
 
@@ -2187,11 +2188,11 @@ def test_agent_dataset(str_loader):
 
 if __name__ == '__main__':
 
-    print('NEW L5KIT, NO AUG, train_data_loader_10, 70, 130, 200, WEIGHT BY AGENT COUNT')
+    print('NEW L5KIT, NO AUG, train_data_loader_10, 70, 130, 200, WEIGHT BY AGENT COUNT 4')
 
     run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000//4,
                                    sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
-                                   group_scenes=False, weight_by_agent_count=1,
+                                   group_scenes=False, weight_by_agent_count=4,
                                    clsTrainDataset=MultiMotionPredictDataset,
                                    clsValDataset=MotionPredictDataset,
                                    clsModel=LyftResnet18Transform,
@@ -2200,7 +2201,39 @@ if __name__ == '__main__':
                                    aug='none',
                                    loader_fn=double_channel_agents_ego_map_transform,
                                    cfg_fn=create_config_multi_train_chopped,
-                                   str_train_loaders=['train_data_loader_10', 'train_data_loader_70', 'train_data_loader_130', 'train_data_loader_200'],
+                                   str_train_loaders=['train_data_loader_' + str(i) for i in [10, 70, 130, 200]],
+                                   rasterizer_fn=build_rasterizer)
+
+    print('NEW L5KIT, NO AUG, train_data_loader_10, 70, 130, 200, WEIGHT BY AGENT COUNT 7')
+
+    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000//4,
+                                   sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
+                                   group_scenes=False, weight_by_agent_count=7,
+                                   clsTrainDataset=MultiMotionPredictDataset,
+                                   clsValDataset=MotionPredictDataset,
+                                   clsModel=LyftResnet18Transform,
+                                   fit_fn='fit_fastai_transform', val_fn='test_transform',
+                                   loss_fn=neg_log_likelihood_transform,
+                                   aug='none',
+                                   loader_fn=double_channel_agents_ego_map_transform,
+                                   cfg_fn=create_config_multi_train_chopped,
+                                   str_train_loaders=['train_data_loader_' + str(i) for i in [10, 70, 130, 200]],
+                                   rasterizer_fn=build_rasterizer)
+
+    print('NEW L5KIT, NO AUG, train_data_loader_10, 70, 130, 200, WEIGHT BY AGENT COUNT 12')
+
+    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000//4,
+                                   sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
+                                   group_scenes=False, weight_by_agent_count=12,
+                                   clsTrainDataset=MultiMotionPredictDataset,
+                                   clsValDataset=MotionPredictDataset,
+                                   clsModel=LyftResnet18Transform,
+                                   fit_fn='fit_fastai_transform', val_fn='test_transform',
+                                   loss_fn=neg_log_likelihood_transform,
+                                   aug='none',
+                                   loader_fn=double_channel_agents_ego_map_transform,
+                                   cfg_fn=create_config_multi_train_chopped,
+                                   str_train_loaders=['train_data_loader_' + str(i) for i in [10, 70, 130, 200]],
                                    rasterizer_fn=build_rasterizer)
 
 

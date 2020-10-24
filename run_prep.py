@@ -230,7 +230,7 @@ def create_chopped_dataset_CF(
 
     Differs from L5KIT version in that not all scenes need to have > num_frames_to_copy in order for the function to run.
     In the event that a scene has < num_frames_to_copy that scene is ignored.
-    
+
     Store:
      - a dataset where each scene has been chopped at `num_frames_to_copy` frames;
      - a mask for agents for those final frames based on the original mask and a threshold on the future_frames;
@@ -419,6 +419,7 @@ if __name__ == '__main__':
     """
 
     chop_indices = [10, 30, 50, 70, 90, 110, 130, 150, 180, 200]
+    chop_indices = [20, 40, 60, 80, 100, 120, 140, 160, 170, 190]
     for str_loader in ['train_data_loader', 'val_data_loader']:
         for n in chop_indices:
             print(' : '.join((str_loader, str(n))))
