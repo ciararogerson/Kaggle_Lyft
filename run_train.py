@@ -65,7 +65,7 @@ from datetime import datetime
 
 from settings import BASE_DIR, DATA_DIR, CACHE_DIR, MODEL_DIR, SUBMISSIONS_DIR, SINGLE_MODE_SUBMISSION, MULTI_MODE_SUBMISSION
 
-from configs import create_config, create_config_multi_train_chopped
+from configs import *
 
 from utils import *
 
@@ -754,11 +754,10 @@ class MotionPredictDataset(Dataset):
         out = self.fn_create(self.ds, idx, self.args_dict, self.cfg, self.str_loader)
 
         # Add timestamps and track_ids in the case of test/val
-        if self.add_output:
-            
-            out = out + (self.ds.timestamps[idx].astype(np.int64), self.ds.track_ids[idx].astype(np.int64))
-
-        return out
+        if self.add_output:          
+            return out   
+        else:
+            return out[:-2]
 
 
     def __len__(self):
@@ -877,10 +876,127 @@ class MotionPredictDataset(Dataset):
         im = data["image"].transpose(1, 2, 0)
         im = self.ds.rasterizer.to_rgb(im)
         target_positions_pixels = transform_points(data["target_positions"] + data["centroid"][:2], data["raster_from_world"])
-        draw_trajectory(im, target_positions_pixels, data["target_yaws"], TARGET_POINTS_COLOR, radius=1)
+        draw_trajectory(im, target_positions_pixels, TARGET_POINTS_COLOR, yaws=data["target_yaws"], radius=1)
 
         plt.imshow(im[::-1])
         plt.show()
+
+
+class FullMotionPredictDataset(Dataset):
+    """
+    l5kit Motion prediction dataset wrapper for train_full.zarr
+    """
+
+    def __init__(self,
+                 cfg,
+                 args_dict={},
+                 str_loader='train_data_loader',
+                 fn_rasterizer=build_rasterizer,
+                 fn_create=None):
+
+        self.cfg = cfg
+        self.args_dict = args_dict
+        self.str_loader = str_loader
+        self.fn_rasterizer = fn_rasterizer
+        self.fn_create = fn_create  # Function that takes a filename input and creates a model input
+        
+        self.weight_by_agent_count = self.args_dict['weight_by_agent_count'] if 'weight_by_agent_count' in self.args_dict else 0
+
+        self.setup()
+
+
+    def setup(self):
+
+        self.dm = LocalDataManager(None)
+        self.rasterizer = self.fn_rasterizer(self.cfg, self.dm)
+        self.data_zarr = ChunkedDataset(self.dm.require(self.cfg[self.str_loader]["key"])).open()
+
+        if 'mask_path' in self.cfg[self.str_loader]:
+            mask = np.load(self.cfg[self.str_loader]['mask_path'])["arr_0"]
+            self.ds = AgentDataset(self.cfg,self.data_zarr, self.rasterizer, None, agents_mask=mask, min_frame_history=10, min_frame_future=10)
+        else:
+            self.ds = AgentDataset(self.cfg, self.data_zarr, self.rasterizer, None, None, min_frame_history=10, min_frame_future=10)
+
+        self.sample_size = min(self.cfg[self.str_loader]['samples_per_epoch'], len(self.ds))
+
+        self.shuffle = True if 'train_data_loader' in self.str_loader else False
+
+        self.add_output = True if self.str_loader == 'test_data_loader' else False # Add timestamp and track_id to output
+
+        self.n_epochs = self.args_dict['n_epochs'] if 'n_epochs' in self.args_dict else 1000
+
+        self.set_all_idx()
+
+
+    def __getitem__(self, index):
+        
+        out = self.fn_create(self.ds, index, self.args_dict, self.cfg, self.str_loader)
+
+        # Include timestamps and track_ids in the case of test/val
+        if self.add_output:          
+            return out   
+        else:
+            return out[:-2]
+
+
+    def __len__(self):
+        return self.sample_size
+
+
+    def set_all_idx(self):
+        """
+        Reset sample indexes for the whole dataset
+        """
+        print('resetting')
+        self.current_idx = 0
+        
+        if self.weight_by_agent_count > 0:
+            self.set_all_idx_weight_by_agent_count()
+        else:
+            self.set_all_idx_default()
+
+
+    def set_all_idx_default(self):
+
+        total_samples = self.cfg[self.str_loader]['samples_per_epoch'] * self.n_epochs
+        N = len(self.ds)
+
+        self.all_idx = []
+        counter = 0
+        while len(self.all_idx) < total_samples:
+            self.all_idx.extend(list(range(counter, N, N//total_samples)))
+            counter += 1
+        self.all_idx = self.all_idx[:total_samples]
+        
+        if self.shuffle: random.shuffle(self.all_idx)
+
+
+    def set_all_idx_weight_by_agent_count(self):
+        # TODO
+        #frame_index = bisect.bisect_right(self.cumulative_sizes_agents, index)
+        pass
+
+
+    def map_index(self, index):
+
+        if self.current_idx + index >= len(self.all_idx):
+            self.set_all_idx()
+        return self.all_idx[self.current_idx + index]
+
+
+    def sample_ds(self):
+        """
+        Select self.sample_size indices from the dataset.
+        If you have already sampled the dataset in its entirety then reshuffle 
+        and start sampling again.
+        """
+        if DEBUG: print('Sampling dataset...')
+
+        if self.current_idx >= len(self.all_idx):
+            self.set_all_idx()
+        else:
+            self.current_idx += self.sample_size
+            print(self.current_idx)
 
 
 class MultiMotionPredictDataset(Dataset):
@@ -996,7 +1112,7 @@ def double_channel_agents_ego_map_transform(dataset, idx, args_dict, cfg, str_da
 
     y, transform_matrix, centroid, ego_center = create_y_transform_tensor(data, cfg)
 
-    return [x, transform_matrix, centroid, ego_center], y
+    return [x, transform_matrix, centroid, ego_center], y, int(data['timestamp']), int(data['track_id'])
 
 
 def double_channel_agents_ego_map_avg_transform(dataset, idx, args_dict, cfg, str_data_loader, info=False, info_dict=None):
@@ -1033,7 +1149,7 @@ def double_channel_agents_ego_map_avg_transform(dataset, idx, args_dict, cfg, st
 
     y, transform_matrix, centroid, ego_center = create_y_transform_tensor(data, cfg)
 
-    return [x, transform_matrix, centroid, ego_center], y
+    return [x, transform_matrix, centroid, ego_center], y, int(data['timestamp']), int(data['track_id'])
 
 
 def double_channel_agents_ego_map_dayhour(dataset, idx, args_dict, cfg, str_data_loader, info=False, info_dict=None):
@@ -1077,7 +1193,7 @@ def double_channel_agents_ego_map_dayhour(dataset, idx, args_dict, cfg, str_data
 
     y, transform_matrix, centroid, ego_center = create_y_transform_tensor(data, cfg)
 
-    return [x, transform_matrix, centroid, ego_center], y
+    return [x, transform_matrix, centroid, ego_center], y, int(data['timestamp']), int(data['track_id'])
 
 
 def double_channel_agents_ego_map_coords(dataset, idx, args_dict, cfg, str_data_loader, info=False, info_dict=None):
@@ -1119,7 +1235,7 @@ def double_channel_agents_ego_map_coords(dataset, idx, args_dict, cfg, str_data_
 
     y, transform_matrix, centroid, ego_center = create_y_transform_tensor(data, cfg)
 
-    return [x, transform_matrix, centroid, ego_center], y
+    return [x, transform_matrix, centroid, ego_center], y, int(data['timestamp']), int(data['track_id'])
 
 
 def double_channel_agents_ego_map_relativecoords(dataset, idx, args_dict, cfg, str_data_loader, info=False, info_dict=None):
@@ -1161,7 +1277,7 @@ def double_channel_agents_ego_map_relativecoords(dataset, idx, args_dict, cfg, s
 
     y, transform_matrix, centroid, ego_center = create_y_transform_tensor(data, cfg)
 
-    return [x, transform_matrix, centroid, ego_center], y
+    return [x, transform_matrix, centroid, ego_center], y, int(data['timestamp']), int(data['track_id'])
 
 
 def split_im(im):
@@ -1682,7 +1798,7 @@ class Network(object):
 
         if resample:
             class DataSamplingCallback(Callback):
-                def on_epoch_begin(self, **kwargs):
+                def on_epoch_end(self, **kwargs):
                     learn.data.train_dl.dl.dataset.sample_ds()
 
             learn_callbacks = learn_callbacks + [DataSamplingCallback()]
@@ -1907,7 +2023,7 @@ def fit_multitrain_motion_predict(n_epochs, train_args_dict, val_args_dict,
 # RUN HELPERS
 ##############################################
 
-def setup_args_dicts(clsTrainDataset, clsValDataset, aug, str_network, in_size, pixel_size, ego_center, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count):
+def setup_args_dicts(clsTrainDataset, clsValDataset, aug, str_network, in_size, pixel_size, ego_center, batch_size, samples_per_epoch, n_epochs, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count):
 
     transforms = []
 
@@ -1929,6 +2045,7 @@ def setup_args_dicts(clsTrainDataset, clsValDataset, aug, str_network, in_size, 
                         'TRANSFORMS': transforms,
                         'str_network': str_network,
                         'samples_per_epoch': samples_per_epoch,
+                        'n_epochs': n_epochs,
                         'sample_history_num_frames': sample_history_num_frames,
                         'history_num_frames': history_num_frames,
                         'future_num_frames': future_num_frames,
@@ -1946,6 +2063,7 @@ def setup_args_dicts(clsTrainDataset, clsValDataset, aug, str_network, in_size, 
                         'TRANSFORMS': None,
                         'str_network': str_network,
                         'samples_per_epoch': samples_per_epoch,
+                        'n_epochs': n_epochs,
                         'sample_history_num_frames': sample_history_num_frames,
                         'history_num_frames': history_num_frames,
                         'future_num_frames': future_num_frames,
@@ -1958,7 +2076,7 @@ def setup_args_dicts(clsTrainDataset, clsValDataset, aug, str_network, in_size, 
     return train_args_dict, val_args_dict
 
 
-def setup_test_args_dict(clsDataset, aug, str_network, in_size, pixel_size, ego_center, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count):
+def setup_test_args_dict(clsDataset, aug, str_network, in_size, pixel_size, ego_center, batch_size, samples_per_epoch, n_epochs, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count):
 
     test_args_dict = {'INPUT_SIZE': in_size,
                         'PIXEL_SIZE': pixel_size,
@@ -1967,6 +2085,7 @@ def setup_test_args_dict(clsDataset, aug, str_network, in_size, pixel_size, ego_
                         'TRANSFORMS': None,
                         'str_network': str_network,
                         'samples_per_epoch': samples_per_epoch,
+                        'n_epochs': n_epochs,
                         'sample_history_num_frames': sample_history_num_frames,
                         'history_num_frames': history_num_frames,
                         'future_num_frames': future_num_frames,
@@ -2083,7 +2202,7 @@ def run_tests_multi_motion_predict(model_str='', str_network='resnet18',
         print(' : '.join(('Training model', str_network, 'for input size', str(in_size), 'batch_size', str(batch_size), 'augmentation', aug, 'val_file', os.path.split(val_dict_filepath)[-1])))
 
         # Set up args_dict inputs
-        train_args_dict, val_args_dict = setup_args_dicts(clsTrainDataset, clsValDataset, aug, str_network, in_size, pixel_size, ego_center, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count)
+        train_args_dict, val_args_dict = setup_args_dicts(clsTrainDataset, clsValDataset, aug, str_network, in_size, pixel_size, ego_center, batch_size, samples_per_epoch, n_epochs, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count)
 
         # Fit / evaluate model
         model_checkpoint_path = create_model_checkpoint_path(clsTrainDataset, clsValDataset, clsModel, val_fn, rasterizer_fn, loader_fn, cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center, n_epochs, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count, str_network, aug, model_str)
@@ -2136,7 +2255,7 @@ def run_forecast_multi_motion_predict(model_str='', str_network='resnet18',
         print(' : '.join(('Forecasting for model', str_network, 'for input size', str(in_size), 'batch_size', str(batch_size), 'augmentation', aug, 'test_file', os.path.split(test_dict_filepath)[-1])))
 
         # Set up args_dict inputs
-        test_args_dict = setup_test_args_dict(clsTestDataset, aug, str_network, in_size, pixel_size, ego_center, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count)
+        test_args_dict = setup_test_args_dict(clsTestDataset, aug, str_network, in_size, pixel_size, ego_center, batch_size, samples_per_epoch, n_epochs, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count)
 
         # Fit / evaluate model
         model_checkpoint_path = create_model_checkpoint_path(clsTrainDataset, clsValDataset, clsModel, val_fn, rasterizer_fn, loader_fn, cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center, n_epochs, batch_size, samples_per_epoch, sample_history_num_frames, history_num_frames, future_num_frames, n_modes, max_agents, group_scenes, weight_by_agent_count, str_network, aug, model_str)
@@ -2187,53 +2306,34 @@ def test_agent_dataset(str_loader):
 
 
 if __name__ == '__main__':
+    
+    print('NEW L5KIT, NO AUG, FULL DATASET')
 
-    print('NEW L5KIT, NO AUG, train_data_loader_10, 70, 130, 200, WEIGHT BY AGENT COUNT 4')
-
-    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000//4,
+    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000,
                                    sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
-                                   group_scenes=False, weight_by_agent_count=4,
-                                   clsTrainDataset=MultiMotionPredictDataset,
+                                   group_scenes=False, weight_by_agent_count=0,
+                                   clsTrainDataset=FullMotionPredictDataset,
                                    clsValDataset=MotionPredictDataset,
                                    clsModel=LyftResnet18Transform,
                                    fit_fn='fit_fastai_transform', val_fn='test_transform',
                                    loss_fn=neg_log_likelihood_transform,
                                    aug='none',
                                    loader_fn=double_channel_agents_ego_map_transform,
-                                   cfg_fn=create_config_multi_train_chopped,
-                                   str_train_loaders=['train_data_loader_' + str(i) for i in [10, 70, 130, 200]],
+                                   cfg_fn=create_config_train_full,
+                                   str_train_loaders='train_data_loader',
                                    rasterizer_fn=build_rasterizer)
-
-    print('NEW L5KIT, NO AUG, train_data_loader_10, 70, 130, 200, WEIGHT BY AGENT COUNT 7')
-
-    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000//4,
+    """
+    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000//20,
                                    sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
-                                   group_scenes=False, weight_by_agent_count=7,
+                                   group_scenes=False,
                                    clsTrainDataset=MultiMotionPredictDataset,
                                    clsValDataset=MotionPredictDataset,
                                    clsModel=LyftResnet18Transform,
                                    fit_fn='fit_fastai_transform', val_fn='test_transform',
                                    loss_fn=neg_log_likelihood_transform,
                                    aug='none',
-                                   loader_fn=double_channel_agents_ego_map_transform,
+                                   loader_fn=double_channel_agents_ego_map_coords,
                                    cfg_fn=create_config_multi_train_chopped,
-                                   str_train_loaders=['train_data_loader_' + str(i) for i in [10, 70, 130, 200]],
+                                   str_train_loaders=['train_data_loader_' + str(i) for i in [10, 30, 50, 70, 90, 110, 130, 150, 180, 200,10, 30, 50, 70, 90, 110, 130, 150, 180, 200]],
                                    rasterizer_fn=build_rasterizer)
-
-    print('NEW L5KIT, NO AUG, train_data_loader_10, 70, 130, 200, WEIGHT BY AGENT COUNT 12')
-
-    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000//4,
-                                   sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
-                                   group_scenes=False, weight_by_agent_count=12,
-                                   clsTrainDataset=MultiMotionPredictDataset,
-                                   clsValDataset=MotionPredictDataset,
-                                   clsModel=LyftResnet18Transform,
-                                   fit_fn='fit_fastai_transform', val_fn='test_transform',
-                                   loss_fn=neg_log_likelihood_transform,
-                                   aug='none',
-                                   loader_fn=double_channel_agents_ego_map_transform,
-                                   cfg_fn=create_config_multi_train_chopped,
-                                   str_train_loaders=['train_data_loader_' + str(i) for i in [10, 70, 130, 200]],
-                                   rasterizer_fn=build_rasterizer)
-
-
+    """
