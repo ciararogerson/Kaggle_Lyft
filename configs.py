@@ -457,12 +457,12 @@ def create_config_multi_train_chopped(str_network='', cfg_model_params=None, inp
         },
 
         'test_data_loader': {
-        'key': 'scenes/test.zarr',
-        'mask_path': os.path.join(BASE_DIR, 'scenes/mask.npz'),
-        'batch_size': batch_size,
-        'shuffle': False,
-        'num_workers': num_workers,
-        'samples_per_epoch': 10E+10
+            'key': 'scenes/test.zarr',
+            'mask_path': os.path.join(BASE_DIR, 'scenes/mask.npz'),
+            'batch_size': batch_size,
+            'shuffle': False,
+            'num_workers': num_workers,
+            'samples_per_epoch': 10E+10
         },
     
         'val_data_loader': {

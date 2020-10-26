@@ -728,7 +728,7 @@ class MotionPredictDataset(Dataset):
 
         self.dm = LocalDataManager(None)
         self.rasterizer = self.fn_rasterizer(self.cfg, self.dm)
-        self.data_zarr = ChunkedDataset(self.dm.require(self.cfg[self.str_loader]["key"])).open()
+        self.data_zarr = ChunkedDataset(self.dm.require(self.cfg[self.str_loader]["key"])).open(cached=False)
 
         raw_data_file = os.path.splitext(self.cfg[self.str_loader]["key"])[0].replace('scenes/', '')
 
@@ -909,7 +909,7 @@ class FullMotionPredictDataset(Dataset):
 
         self.dm = LocalDataManager(None)
         self.rasterizer = self.fn_rasterizer(self.cfg, self.dm)
-        self.data_zarr = ChunkedDataset(self.dm.require(self.cfg[self.str_loader]["key"])).open()
+        self.data_zarr = ChunkedDataset(self.dm.require(self.cfg[self.str_loader]["key"])).open(cached=False)
 
         if 'mask_path' in self.cfg[self.str_loader]:
             mask = np.load(self.cfg[self.str_loader]['mask_path'])["arr_0"]
@@ -947,7 +947,6 @@ class FullMotionPredictDataset(Dataset):
         """
         Reset sample indexes for the whole dataset
         """
-        print('resetting')
         self.current_idx = 0
         
         if self.weight_by_agent_count > 0:
@@ -996,7 +995,6 @@ class FullMotionPredictDataset(Dataset):
             self.set_all_idx()
         else:
             self.current_idx += self.sample_size
-            print(self.current_idx)
 
 
 class MultiMotionPredictDataset(Dataset):
@@ -1798,7 +1796,7 @@ class Network(object):
 
         if resample:
             class DataSamplingCallback(Callback):
-                def on_epoch_end(self, **kwargs):
+                def on_epoch_begin(self, **kwargs):
                     learn.data.train_dl.dl.dataset.sample_ds()
 
             learn_callbacks = learn_callbacks + [DataSamplingCallback()]
@@ -2290,7 +2288,7 @@ def test_agent_dataset(str_loader):
     
     dm = LocalDataManager(None)
     rasterizer = build_rasterizer(cfg, dm)
-    data_zarr = ChunkedDataset(dm.require(cfg[str_loader]["key"])).open()
+    data_zarr = ChunkedDataset(dm.require(cfg[str_loader]["key"])).open(cached=False)
 
     raw_data_file = os.path.splitext(cfg[str_loader]["key"])[0].replace('scenes/', '')
 
@@ -2306,7 +2304,7 @@ def test_agent_dataset(str_loader):
 
 
 if __name__ == '__main__':
-    
+    """
     print('NEW L5KIT, NO AUG, FULL DATASET')
 
     run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000,
@@ -2323,17 +2321,33 @@ if __name__ == '__main__':
                                    str_train_loaders='train_data_loader',
                                    rasterizer_fn=build_rasterizer)
     """
-    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000//20,
-                                   sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
-                                   group_scenes=False,
+    chop_indices = list(range(10, 201, 10))
+    run_tests_multi_motion_predict(n_epochs=1000, in_size=320, batch_size=256, samples_per_epoch=17000//len(chop_indices),
+                                   sample_history_num_frames=10, history_num_frames=10, future_num_frames=50,
+                                   group_scenes=False, weight_by_agent_count=7,
                                    clsTrainDataset=MultiMotionPredictDataset,
                                    clsValDataset=MotionPredictDataset,
                                    clsModel=LyftResnet18Transform,
                                    fit_fn='fit_fastai_transform', val_fn='test_transform',
                                    loss_fn=neg_log_likelihood_transform,
                                    aug='none',
-                                   loader_fn=double_channel_agents_ego_map_coords,
+                                   loader_fn=double_channel_agents_ego_map_avg_transform,
                                    cfg_fn=create_config_multi_train_chopped,
-                                   str_train_loaders=['train_data_loader_' + str(i) for i in [10, 30, 50, 70, 90, 110, 130, 150, 180, 200,10, 30, 50, 70, 90, 110, 130, 150, 180, 200]],
+                                   str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
                                    rasterizer_fn=build_rasterizer)
-    """
+
+    run_forecast_multi_motion_predict(n_epochs=1000, in_size=320, batch_size=256,
+                                   samples_per_epoch=17000 // len(chop_indices),
+                                   sample_history_num_frames=10, history_num_frames=10, future_num_frames=50,
+                                   group_scenes=False, weight_by_agent_count=7,
+                                   clsTrainDataset=MultiMotionPredictDataset,
+                                   clsValDataset=MotionPredictDataset,
+                                   clsModel=LyftResnet18Transform,
+                                   fit_fn='fit_fastai_transform', val_fn='test_transform',
+                                   loss_fn=neg_log_likelihood_transform,
+                                   aug='none',
+                                   loader_fn=double_channel_agents_ego_map_avg_transform,
+                                   cfg_fn=create_config_multi_train_chopped,
+                                   str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
+                                   rasterizer_fn=build_rasterizer)
+    
