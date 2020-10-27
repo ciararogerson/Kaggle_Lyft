@@ -269,6 +269,31 @@ def estimate_validation_weights(val_paths):
     return estimate_ensemble(val_sub_paths)
 
 
+def generate_ensemble_submission(submission_paths, weights):
+
+    subs = generate_subs(submission_paths)
+
+    predictions = {'preds': np.stack([np.concatenate([sub[conf_names[j]].values.reshape(-1, 1, 50, 2) for j in range(3)], axis=1) for sub in subs], axis=0),
+                    'confs': np.stack([sub[confs].values for sub in subs], axis=0)}
+
+    ensembled_predictions = combine_predictions(deepcopy(predictions), weights)
+
+    write_pred_csv(os.path.join(SUBMISSIONS_DIR, 'submission.csv'), 
+                    subs[0]['timestamps'].values, 
+                    subs[0]['track_ids'].values, 
+                    ensembled_predictions['preds'], 
+                    ensembled_predictions['confs'])
+
+
+def generate_ensemble_prediction(submission_paths, weights=None):
+
+    if weights is None:
+        weights = [1.] * len(submission_paths)
+
+    generate_ensemble_submission(submission_paths, weights)
+
+
+
 if __name__ == '__main__':
 
     val_paths = [os.path.join(DATA_DIR, 'val_test_transform_LyftResnet18Transform_double_channel_agents_ego_map_dayhour_create_config_train_chopped_neg_log_likelihood_transform_320_0.5_0.5_0.25_0.5_600_256_17000_10_10_50_3_40_resnet18_fit_fastai_transform_heavycoarsedropoutblur__.pkl'),
