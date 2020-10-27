@@ -3,7 +3,11 @@ import pickle
 import os
 import numpy as np
 from timeit import default_timer as timer
-
+import multiprocessing as mp
+from multiprocessing import Pool
+from timeit import default_timer as timer
+import time
+from time import sleep
 
 ##############################################
 # DATA OPS
@@ -90,6 +94,50 @@ def dict_difference(dict1, dict2):
         return all(dict_difference(dict1[k], v) if isinstance(v, dict) else np.array_equal(dict1[k], v) if is_numpy(v) else dict1[k] == v for k, v in dict2.items())
     else:
         return False
+
+
+def execute_mp_map(fn_target, arg_list, fn_init = None, init_args = None, boo_async = False, display_iter = 1, num_parallel_cores = 8):
+    """
+    Function which executes fn_target over multiple processes using map (if boo_async = False) or map_async (if boo_async = True)
+    """
+   
+    num_batches = len(arg_list)
+
+    # Initiate processes
+    if fn_init is not None:
+        p = Pool(processes = min(num_batches, num_parallel_cores), initializer = fn_init, initargs = init_args)
+    else:
+        p = Pool(processes = min(num_batches, num_parallel_cores))
+
+    if boo_async:
+
+        this_process_set = p.map_async(fn_target, arg_list, chunksize = 1) # include chunksize = 1 so that you get accurate progress reports below, otherwise _number_left refers to the number of chunks left (after arg_list has been split into chunks)
+
+        # Wait for the processes to complete, updating on progress as you go
+        last_time = timer()
+        num_displayed = 0
+        while (True):
+            if (this_process_set.ready()): break
+            if (np.mod(num_batches - this_process_set._number_left, display_iter) == 0) and ((num_batches - this_process_set._number_left) != num_displayed):
+                num_displayed = num_batches - this_process_set._number_left
+                this_time = timer()
+                print(''.join(('execute_mp_map> ', fn_target.__name__, ' completed batch ', str(num_batches - this_process_set._number_left),' / ', str(num_batches), '... \n Time elapsed: ', str(this_time - last_time), ' secs')))
+                last_time = this_time
+            sleep(1)
+        
+        # Estimation has completed, get the results
+        results = this_process_set.get()
+
+    else:
+
+        results = p.map(fn_target, arg_list, chunksize = 1) 
+
+    # Clean up
+    p.close()
+    p.join()
+
+    return results
+
 
 
 if __name__ == '__main__':

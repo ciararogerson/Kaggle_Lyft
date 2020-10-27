@@ -930,7 +930,13 @@ class FullMotionPredictDataset(Dataset):
 
     def __getitem__(self, index):
         
-        out = self.fn_create(self.ds, index, self.args_dict, self.cfg, self.str_loader)
+        try:
+            out = self.fn_create(self.ds, index, self.args_dict, self.cfg, self.str_loader)
+        except:
+            print('********************************')
+            print(self.str_loader)
+            print(index)
+            print('********************************')
 
         # Include timestamps and track_ids in the case of test/val
         if self.add_output:          
@@ -1048,8 +1054,14 @@ class MultiMotionPredictDataset(Dataset):
         
         dataset_loc = np.argmax(np.less(index, self.cumulative_dataset_sizes))
         idx = index if dataset_loc==0 else index - self.cumulative_dataset_sizes[dataset_loc - 1]
-
-        out = self.dataset_list[dataset_loc][idx]
+        
+        try:
+            out = self.dataset_list[dataset_loc][idx]
+        except:
+            print('********************************')
+            print(self.str_loader[dataset_loc])
+            print(idx)
+            print('********************************')
 
         return out
 
@@ -2322,8 +2334,8 @@ if __name__ == '__main__':
                                    rasterizer_fn=build_rasterizer)
     """
     chop_indices = list(range(10, 201, 10))
-    run_tests_multi_motion_predict(n_epochs=1000, in_size=320, batch_size=256, samples_per_epoch=17000//len(chop_indices),
-                                   sample_history_num_frames=10, history_num_frames=10, future_num_frames=50,
+    run_tests_multi_motion_predict(n_epochs=1000, in_size=128, batch_size=256, samples_per_epoch=17000//len(chop_indices),
+                                   sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
                                    group_scenes=False, weight_by_agent_count=7,
                                    clsTrainDataset=MultiMotionPredictDataset,
                                    clsValDataset=MotionPredictDataset,
@@ -2336,9 +2348,9 @@ if __name__ == '__main__':
                                    str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
                                    rasterizer_fn=build_rasterizer)
 
-    run_forecast_multi_motion_predict(n_epochs=1000, in_size=320, batch_size=256,
+    run_forecast_multi_motion_predict(n_epochs=1000, in_size=128, batch_size=256,
                                    samples_per_epoch=17000 // len(chop_indices),
-                                   sample_history_num_frames=10, history_num_frames=10, future_num_frames=50,
+                                   sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
                                    group_scenes=False, weight_by_agent_count=7,
                                    clsTrainDataset=MultiMotionPredictDataset,
                                    clsValDataset=MotionPredictDataset,
