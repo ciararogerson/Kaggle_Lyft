@@ -6,18 +6,14 @@ import numpy as np
 import pandas as pd
 import os
 import random
-import pickle
-import inspect
 from timeit import default_timer as timer
 from tqdm import tqdm
-import itertools
 import scipy.optimize as optimize
 import matplotlib.pyplot as plt
 import math
 from datetime import datetime
 from copy import deepcopy
 
-from l5kit.evaluation.metrics import neg_multi_log_likelihood
 from l5kit.evaluation import write_pred_csv, read_gt_csv
 
 from settings import BASE_DIR, DATA_DIR, SUBMISSIONS_DIR, SINGLE_MODE_SUBMISSION, MULTI_MODE_SUBMISSION
@@ -232,13 +228,15 @@ def estimate_ensemble(sub_paths):
     n = predictions['preds'].shape[0]
 
     base_p = combine_predictions(deepcopy(predictions), np.ones((n,)))
-    orig_nll = numpy_neg_multi_log_likelihood(y['truth'], base_p['preds'], base_p['confs'], y['avails'])
-    print(''.join(('Original nll: ', str(orig_nll))))
+    orig_nlls = [numpy_neg_multi_log_likelihood(y['truth'], predictions['preds'][i], predictions['confs'][i], y['avails']) for i in range(n)]
+    avg_nll = numpy_neg_multi_log_likelihood(y['truth'], base_p['preds'], base_p['confs'], y['avails'])
+    print(''.join(('Original nlls: ', str(orig_nlls))))
+    print(''.join(('Avg nlls: ', str(avg_nll))))
 
     weights, opt_nll = opt(predictions, y, weights_min=[0]*n, weights_max=[1.0]*n)
 
     print('*********************************************************************************')
-    print(' : '.join((str(weights), str(opt_nll), str(orig_nll))))
+    print(' : '.join((str(weights), str(opt_nll), str(avg_nll), str(orig_nlls))))
     print('*********************************************************************************')
 
     return weights, opt_nll
