@@ -817,7 +817,7 @@ class MotionPredictDataset(Dataset):
         scene_cumcount = grp_range(count)[np.argsort(self.ds.scene_indices, kind='mergesort').argsort(kind='mergesort')]  # Use mergesort to guarantee same results each time
 
         # Create all_idx by selecting one agent/frame from each scene consecutively
-        cumcounts = range(int(scene_cumcount.max()))
+        cumcounts = range(int(scene_cumcount.max())) if self.weight_by_agent_count <= 0 else range(min(self.weight_by_agent_count, int(scene_cumcount.max())))
         self.all_idx = list(np.concatenate([np.argwhere(scene_cumcount == i).reshape(-1, ) for i in tqdm(cumcounts)]))
 
 
@@ -1566,7 +1566,7 @@ def data_transform_to_modes(pred, truth):
     return pred_orig, pred_transform, truth_orig, truth_transform, conf, mask, batch_size, n_modes, future_num_frames, centroid
 
 
-def torch_neg_multi_log_likelihood(gt, pred, confidences, avails):
+def torch_neg_multi_log_likelihood(gt, pred, confidences, avails, use_weights=False):
     """
     pytorch version of l5kit's neg_multi_log_likelihood
     """
@@ -1574,6 +1574,11 @@ def torch_neg_multi_log_likelihood(gt, pred, confidences, avails):
     # add modes and cords
     gt = gt.unsqueeze(1)
     avails = avails.unsqueeze(1).unsqueeze(-1)
+
+    if use_weights:
+        weights = torch.ones_like(avails)
+        weights[:, :, -10:, :] = 4.0
+        avails = avails * weights
 
     # error (batch_size, num_modes, future_len), reduce coords and use availability
     error = torch.sum(((gt - pred) * avails) ** 2, dim=-1)
@@ -1620,6 +1625,35 @@ def neg_log_likelihood_transform(pred, truth, calctype='transform', reduction='m
 def neg_log_likelihood_transform_orig(pred, truth, reduction='mean'):
     # For assessing original coordinate system under transform data format
     return neg_log_likelihood_transform(pred, truth, calctype='orig', reduction=reduction)
+
+
+def neg_log_likelihood_weighted(pred, truth, calctype='transform', reduction='mean'):
+    """
+    pred = n_modes (confidence for each mode) + (future_num_frames * 3 (x, y, yaw) * 2)
+    """
+    pred_orig, pred_transform, truth_orig, truth_transform, conf, mask, batch_size, n_modes, future_num_frames, centroid = data_transform_to_modes(pred.cpu(), truth.cpu())
+
+    if calctype.lower() == 'orig':
+        nll = torch_neg_multi_log_likelihood(truth_orig.reshape(batch_size, future_num_frames, -1)[:, :, :2],
+                                            pred_orig.reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :, :2],  # ignore yaws
+                                            conf.reshape(batch_size, n_modes), 
+                                            mask.reshape(batch_size, future_num_frames, -1)[:, :, 0],
+                                            use_weights=True) 
+    elif calctype.lower() == 'transform':
+        nll = torch_neg_multi_log_likelihood(truth_transform.reshape(batch_size, future_num_frames, -1)[:, :, :2],
+                                            pred_transform.reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :, :2],  # ignore yaws
+                                            conf.reshape(batch_size, n_modes), 
+                                            mask.reshape(batch_size, future_num_frames, -1)[:, :, 0], 
+                                            use_weights=True) 
+    else:
+        nll = torch.Tensor([0]).float()
+
+    if reduction.lower() == 'mean':
+        return nll.mean()
+    elif reduction.lower() == 'sum':
+        return nll.sum()
+    else:
+        return nll
 
 
 @dataclass
@@ -2017,6 +2051,8 @@ def fit_multitrain_motion_predict(n_epochs, train_args_dict, val_args_dict,
     # Fit
     if action == 'fit':
         val_dict = getattr(net, fit_fn)(n_epochs, loss_fn=loss_fn)
+        # Clear train_data_loader as it can be memory hogging
+        train_loader, net.train_loader = None, None
 
     # Load best weights and predict
     load_weights(net.net, model_checkpoint_path)
@@ -2349,11 +2385,12 @@ if __name__ == '__main__':
                                    rasterizer_fn=build_rasterizer)
     """
 
-    chop_indices = list(range(10, 201, 20))
+    chop_indices = list(range(10, 201, 10))
+    chop_indices = [10, 30, 40, 60, 70, 90, 100, 120, 130, 150, 160, 180, 200]
 
-    run_tests_multi_motion_predict(n_epochs=1000, in_size=320, batch_size=256,
+    run_tests_multi_motion_predict(n_epochs=1000, in_size=196, batch_size=256,
                                    samples_per_epoch=17000 // len(chop_indices),
-                                   sample_history_num_frames=10, history_num_frames=10, history_step_size=1, future_num_frames=50,
+                                   sample_history_num_frames=7, history_num_frames=7, history_step_size=1, future_num_frames=50,
                                    group_scenes=False, weight_by_agent_count=7,
                                    clsTrainDataset=MultiMotionPredictDataset,
                                    clsValDataset=MotionPredictDataset,
@@ -2361,14 +2398,14 @@ if __name__ == '__main__':
                                    fit_fn='fit_fastai_transform', val_fn='test_transform',
                                    loss_fn=neg_log_likelihood_transform,
                                    aug='none',
-                                   loader_fn=double_channel_agents_ego_map_avg_transform,
+                                   loader_fn=double_channel_agents_ego_map_dayhour,
                                    cfg_fn=create_config_multi_train_chopped_lite,
                                    str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
                                    rasterizer_fn=build_rasterizer)
 
-    run_forecast_multi_motion_predict(n_epochs=1000, in_size=320, batch_size=256,
+    run_forecast_multi_motion_predict(n_epochs=1000, in_size=196, batch_size=256,
                                    samples_per_epoch=17000 // len(chop_indices),
-                                   sample_history_num_frames=10, history_num_frames=10, history_step_size=1,
+                                   sample_history_num_frames=7, history_num_frames=7, history_step_size=1,
                                    future_num_frames=50,
                                    group_scenes=False, weight_by_agent_count=7,
                                    clsTrainDataset=MultiMotionPredictDataset,
@@ -2377,7 +2414,7 @@ if __name__ == '__main__':
                                    fit_fn='fit_fastai_transform', val_fn='test_transform',
                                    loss_fn=neg_log_likelihood_transform,
                                    aug='none',
-                                   loader_fn=double_channel_agents_ego_map_avg_transform,
+                                   loader_fn=double_channel_agents_ego_map_dayhour,
                                    cfg_fn=create_config_multi_train_chopped_lite,
                                    str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
                                    rasterizer_fn=build_rasterizer)
