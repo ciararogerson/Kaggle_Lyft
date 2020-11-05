@@ -333,6 +333,54 @@ class AgentDatasetRandomEgoCentre(AgentDatasetCF):
                                         )
 
 
+class AgentDatasetTL(AgentDatasetCF):
+    """
+    Exposes scene_id, frame_id, track_id and timestamp for each agent
+    so that these can be used in sampling strategy
+    """
+    def __init__(
+        self,
+        raw_data_file: str,
+        cfg: dict,
+        str_loader: str,
+        zarr_dataset: ChunkedDataset,
+        rasterizer: Rasterizer,
+        perturbation: Optional[Perturbation] = None,
+        agents_mask: Optional[np.ndarray] = None,
+        min_frame_history: int = 10,
+        min_frame_future: int = 10,  # Changed from 1 to 10 2020-09-20
+    ):
+        assert perturbation is None, "AgentDataset does not support perturbation (yet)"
+
+        super(AgentDatasetTL, self).__init__(raw_data_file, 
+                                                    cfg, 
+                                                    str_loader, 
+                                                    zarr_dataset, 
+                                                    rasterizer, 
+                                                    perturbation, 
+                                                    agents_mask, 
+                                                    min_frame_history, 
+                                                    min_frame_future)
+
+        render_context = RenderContext(
+            raster_size_px=np.array(cfg["raster_params"]["raster_size"]),
+            pixel_size_m=np.array(cfg["raster_params"]["pixel_size"]),
+            center_in_raster_ratio=np.array(cfg["raster_params"]["ego_center"]),
+        )
+        # Overwrite sample function:
+        # build a partial so we don't have to access cfg each time
+        self.sample_function = partial(generate_agent_sample_tl_persistence,
+                                        render_context=render_context,
+                                        history_num_frames=cfg["model_params"]["history_num_frames"],
+                                        history_step_size=cfg["model_params"]["history_step_size"],
+                                        future_num_frames=cfg["model_params"]["future_num_frames"],
+                                        future_step_size=cfg["model_params"]["future_step_size"],
+                                        filter_agents_threshold=cfg["raster_params"]["filter_agents_threshold"],
+                                        rasterizer=rasterizer,
+                                        perturbation=perturbation,
+                                        )
+
+
 class SemanticTLRasterizer(SemanticRasterizer):
     """
     Rasteriser for the vectorised semantic map with historic traffic lights as a separate channel(generally loaded from json files).
@@ -376,18 +424,21 @@ class SemanticTLRasterizer(SemanticRasterizer):
         """
 
         img = 255 * np.ones(shape=(self.raster_size[1], self.raster_size[0], 3), dtype=np.uint8)
-        tl_imgs = [255 * np.ones(shape=(self.raster_size[1], self.raster_size[0], 3), dtype=np.uint8) for i in range(len(history_tl_faces) - 1)]
+        tl_img = 255 * np.ones(shape=(self.raster_size[1], self.raster_size[0], 3), dtype=np.uint8) 
 
         # filter using half a radius from the center
         raster_radius = float(np.linalg.norm(self.raster_size * self.pixel_size)) / 2
 
         # get active traffic light faces
-        history_active_tl_ids = [set(filter_tl_faces_by_status(tl_faces, "ACTIVE")["face_id"].tolist()) for tl_faces in history_tl_faces]
+        all_active_tls = [filter_tl_faces_by_status(tl_faces, "ACTIVE") for tl_faces in history_tl_faces]
+        curr_active_tl_ids = create_active_tl_dict(all_active_tls[0], all_active_tls[1:])
         
         # plot lanes
-        lanes_lines = [defaultdict(list) for tl_faces in history_tl_faces]
+        lanes_lines = defaultdict(list)
+        persistence_lines = defaultdict(list)
 
         for idx in elements_within_bounds(center_world, self.bounds_info["lanes"]["bounds"], raster_radius):
+
             lane = self.proto_API[self.bounds_info["lanes"]["ids"][idx]].element.lane
 
             # get image coords
@@ -399,30 +450,31 @@ class SemanticTLRasterizer(SemanticRasterizer):
             # Note(lberg): this called on all polygons skips some of them, don't know why
             cv2.fillPoly(img, [lanes_area], (17, 17, 31), lineType=cv2.LINE_AA, shift=CV2_SHIFT)
 
-            for tl_idx, active_tl_ids in enumerate(history_active_tl_ids):
-                lane_type = "default"  # no traffic light face is controlling this lane
-                lane_tl_ids = set([MapAPI.id_as_str(la_tc) for la_tc in lane.traffic_controls])
-                for tl_id in lane_tl_ids.intersection(active_tl_ids):
-                    if self.proto_API.is_traffic_face_colour(tl_id, "red"):
-                        lane_type = "red"
-                    elif self.proto_API.is_traffic_face_colour(tl_id, "green"):
-                        lane_type = "green"
-                    elif self.proto_API.is_traffic_face_colour(tl_id, "yellow"):
-                        lane_type = "yellow"
+            # Create lane lines for the current index
+            lane_type = "default"  # no traffic light face is controlling this lane
+            lane_tl_ids = set([MapAPI.id_as_str(la_tc) for la_tc in lane.traffic_controls])
+            for tl_id in lane_tl_ids.intersection(set(curr_active_tl_ids.keys())):
+                if self.proto_API.is_traffic_face_colour(tl_id, "red"):
+                    lane_type = "red"
+                elif self.proto_API.is_traffic_face_colour(tl_id, "green"):
+                    lane_type = "green"
+                elif self.proto_API.is_traffic_face_colour(tl_id, "yellow"):
+                    lane_type = "yellow"
 
-                lanes_lines[tl_idx][lane_type].extend([xy_left, xy_right])
+                persistence_val = curr_active_tl_ids[tl_id]
+                persistence_lines[persistence_val].extend([xy_left, xy_right])
 
-        cv2.polylines(img, lanes_lines[0]["default"], False, (255, 217, 82), lineType=cv2.LINE_AA, shift=CV2_SHIFT)
-        cv2.polylines(img, lanes_lines[0]["green"], False, (0, 255, 0), lineType=cv2.LINE_AA, shift=CV2_SHIFT)
-        cv2.polylines(img, lanes_lines[0]["yellow"], False, (255, 255, 0), lineType=cv2.LINE_AA, shift=CV2_SHIFT)
-        cv2.polylines(img, lanes_lines[0]["red"], False, (255, 0, 0), lineType=cv2.LINE_AA, shift=CV2_SHIFT)
+            lanes_lines[lane_type].extend([xy_left, xy_right])
 
-        # Fill in tl history
-        for tl_idx in range(1, len(lanes_lines)):
-            cv2.polylines(tl_imgs[tl_idx-1], lanes_lines[tl_idx]["default"], False, (255, 217, 82), lineType=cv2.LINE_AA, shift=CV2_SHIFT)
-            cv2.polylines(tl_imgs[tl_idx-1], lanes_lines[tl_idx]["green"], False, (0, 255, 0), lineType=cv2.LINE_AA, shift=CV2_SHIFT)
-            cv2.polylines(tl_imgs[tl_idx-1], lanes_lines[tl_idx]["yellow"], False, (255, 255, 0), lineType=cv2.LINE_AA, shift=CV2_SHIFT)
-            cv2.polylines(tl_imgs[tl_idx-1], lanes_lines[tl_idx]["red"], False, (255, 0, 0), lineType=cv2.LINE_AA, shift=CV2_SHIFT)
+        cv2.polylines(img, lanes_lines["default"], False, (255, 217, 82), lineType=cv2.LINE_AA, shift=CV2_SHIFT)
+        cv2.polylines(img, lanes_lines["green"], False, (0, 255, 0), lineType=cv2.LINE_AA, shift=CV2_SHIFT)
+        cv2.polylines(img, lanes_lines["yellow"], False, (255, 255, 0), lineType=cv2.LINE_AA, shift=CV2_SHIFT)
+        cv2.polylines(img, lanes_lines["red"], False, (255, 0, 0), lineType=cv2.LINE_AA, shift=CV2_SHIFT)
+
+        # Fill in tl persistence 
+        for p in persistence_lines.keys():
+            cv2.polylines(tl_img, persistence_lines[p], False, (0, 0, int(p)), lineType=cv2.LINE_AA, shift=CV2_SHIFT)
+        #if True: plt.imshow(tl_img); plt.title(str(len(persistence_lines))); plt.show()
 
         # plot crosswalks
         crosswalks = []
@@ -434,8 +486,7 @@ class SemanticTLRasterizer(SemanticRasterizer):
 
         cv2.polylines(img, crosswalks, True, (255, 117, 69), lineType=cv2.LINE_AA, shift=CV2_SHIFT)
 
-        tl_imgs = [np.sum(tl_img, axis=-1) for tl_img in tl_imgs]
-        tl_img = np.sum(np.stack(tl_imgs, axis=-1), axis=-1)
+        tl_img = np.sum(tl_img, axis=-1)
 
         return np.concatenate([img, tl_img[:, :, np.newaxis]], axis=-1)
 
@@ -460,6 +511,307 @@ class SemBoxTLRasterizer(SemBoxRasterizer):
 
         # Change self.sat_rast reference to include traffic lights as separate channel
         self.sat_rast = SemanticTLRasterizer(render_context, semantic_map_path, world_to_ecef)
+
+
+def create_active_tl_dict(curr_active_tl_ids, history_active_tl_ids):
+    """
+    Create a dictionary with keys active_tl_ids['face_id']
+    and values the number of frames that this has persisted for
+    """
+    n = len(history_active_tl_ids)
+    tl_dict = {face_id: n for face_id in [curr_tl['face_id'] for curr_tl in curr_active_tl_ids]}
+
+    for curr_tl in curr_active_tl_ids:
+        for i, hist_tl in enumerate(history_active_tl_ids):
+            u_hist_tl = np.unique(hist_tl)
+            tl_idx = np.argwhere(u_hist_tl['traffic_light_id']==curr_tl['traffic_light_id']).reshape(-1,)
+            if len(tl_idx) > 0:
+                # It's possible that a traffic light has more than one face lit.
+                # What do we do here? In this case we count it as a change (you could treat this differently)
+                if np.any([u_hist_tl['face_id'][idx] != curr_tl['face_id'] for idx in tl_idx]):
+                    tl_dict[curr_tl['face_id']] = i 
+                    break
+        
+    return tl_dict
+                
+
+def generate_agent_sample_tl_persistence(
+    state_index: int,
+    frames: np.ndarray,
+    agents: np.ndarray,
+    tl_faces: np.ndarray,
+    selected_track_id: Optional[int],
+    render_context: RenderContext,
+    history_num_frames: int,
+    history_step_size: int,
+    future_num_frames: int,
+    future_step_size: int,
+    filter_agents_threshold: float,
+    rasterizer: Optional[Rasterizer] = None,
+    perturbation: Optional[Perturbation] = None,
+) -> dict:
+    """Generates the inputs and targets to train a deep prediction model. A deep prediction model takes as input
+    the state of the world (here: an image we will call the "raster"), and outputs where that agent will be some
+    seconds into the future.
+
+    This function has a lot of arguments and is intended for internal use, you should try to use higher level classes
+    and partials that use this function.
+
+    Args:
+        state_index (int): The anchor frame index, i.e. the "current" timestep in the scene
+        frames (np.ndarray): The scene frames array, can be numpy array or a zarr array
+        agents (np.ndarray): The full agents array, can be numpy array or a zarr array
+        tl_faces (np.ndarray): The full traffic light faces array, can be numpy array or a zarr array
+        selected_track_id (Optional[int]): Either None for AV, or the ID of an agent that you want to
+        predict the future of. This agent is centered in the raster and the returned targets are derived from
+        their future states.
+        raster_size (Tuple[int, int]): Desired output raster dimensions
+        pixel_size (np.ndarray): Size of one pixel in the real world
+        ego_center (np.ndarray): Where in the raster to draw the ego, [0.5,0.5] would be the center
+        history_num_frames (int): Amount of history frames to draw into the rasters
+        history_step_size (int): Steps to take between frames, can be used to subsample history frames
+        future_num_frames (int): Amount of history frames to draw into the rasters
+        future_step_size (int): Steps to take between targets into the future
+        filter_agents_threshold (float): Value between 0 and 1 to use as cutoff value for agent filtering
+        based on their probability of being a relevant agent
+        rasterizer (Optional[Rasterizer]): Rasterizer of some sort that draws a map image
+        perturbation (Optional[Perturbation]): Object that perturbs the input and targets, used
+    to train models that can recover from slight divergence from training set data
+
+    Raises:
+        ValueError: A ValueError is returned if the specified ``selected_track_id`` is not present in the scene
+        or was filtered by applying the ``filter_agent_threshold`` probability filtering.
+
+    Returns:
+        dict: a dict object with the raster array, the future offset coordinates (meters),
+        the future yaw angular offset, the future_availability as a binary mask
+    """
+    #  the history slice is ordered starting from the latest frame and goes backward in time., ex. slice(100, 91, -2)
+    all_history_slice = get_history_slice(state_index, state_index, history_step_size, include_current_state=True)
+    history_slice = get_history_slice(state_index, history_num_frames, history_step_size, include_current_state=True)
+    future_slice = get_future_slice(state_index, future_num_frames, future_step_size)
+
+    all_history_frames = frames[all_history_slice].copy() # TL data will be based on all history
+    history_frames = frames[history_slice].copy()  # copy() required if the object is a np.ndarray
+    future_frames = frames[future_slice].copy()
+
+    sorted_frames = np.concatenate((history_frames[::-1], future_frames))  # from past to future
+
+    # get agents (past and future)
+    agent_slice = get_agents_slice_from_frames(sorted_frames[0], sorted_frames[-1])
+    agents = agents[agent_slice].copy()  # this is the minimum slice of agents we need
+    history_frames["agent_index_interval"] -= agent_slice.start  # sync interval with the agents array
+    future_frames["agent_index_interval"] -= agent_slice.start  # sync interval with the agents array
+    history_agents = filter_agents_by_frames(history_frames, agents)
+    future_agents = filter_agents_by_frames(future_frames, agents)
+  
+    # sync interval with the traffic light faces array
+    tl_slice = get_tl_faces_slice_from_frames(all_history_frames[-1], all_history_frames[0])  # -1 is the farthest
+    all_history_frames["traffic_light_faces_index_interval"] -= tl_slice.start
+    history_tl_faces = filter_tl_faces_by_frames(all_history_frames, tl_faces[tl_slice].copy())
+
+    # State you want to predict the future of.
+    cur_frame = history_frames[0]
+    cur_agents = history_agents[0]
+
+    if selected_track_id is None:
+        agent_centroid_m = cur_frame["ego_translation"][:2]
+        agent_yaw_rad = rotation33_as_yaw(cur_frame["ego_rotation"])
+        agent_extent_m = np.asarray((EGO_EXTENT_LENGTH, EGO_EXTENT_WIDTH, EGO_EXTENT_HEIGHT))
+        selected_agent = None
+    else:
+        # this will raise IndexError if the agent is not in the frame or under agent-threshold
+        # this is a strict error, we cannot recover from this situation
+        try:
+            agent = filter_agents_by_track_id(
+                filter_agents_by_labels(cur_agents, filter_agents_threshold), selected_track_id
+            )[0]
+        except IndexError:
+            raise ValueError(f" track_id {selected_track_id} not in frame or below threshold")
+        agent_centroid_m = agent["centroid"]
+        agent_yaw_rad = float(agent["yaw"])
+        agent_extent_m = agent["extent"]
+        selected_agent = agent
+
+    input_im = (
+        None
+        if not rasterizer
+        else rasterizer.rasterize(history_frames, history_agents, history_tl_faces, selected_agent)
+    )
+
+    world_from_agent = compute_agent_pose(agent_centroid_m, agent_yaw_rad)
+    agent_from_world = np.linalg.inv(world_from_agent)
+    raster_from_world = render_context.raster_from_world(agent_centroid_m, agent_yaw_rad)
+
+    future_coords_offset, future_yaws_offset, future_availability = _create_targets_for_deep_prediction(
+        future_num_frames, future_frames, selected_track_id, future_agents, agent_from_world, agent_yaw_rad
+    )
+
+    # history_num_frames + 1 because it also includes the current frame
+    history_coords_offset, history_yaws_offset, history_availability = _create_targets_for_deep_prediction(
+        history_num_frames + 1, history_frames, selected_track_id, history_agents, agent_from_world, agent_yaw_rad
+    )
+
+    return {
+        "image": input_im,
+        "target_positions": future_coords_offset,
+        "target_yaws": future_yaws_offset,
+        "target_availabilities": future_availability,
+        "history_positions": history_coords_offset,
+        "history_yaws": history_yaws_offset,
+        "history_availabilities": history_availability,
+        "world_to_image": raster_from_world,  # TODO deprecate
+        "raster_from_agent": raster_from_world @ world_from_agent,
+        "raster_from_world": raster_from_world,
+        "agent_from_world": agent_from_world,
+        "world_from_agent": world_from_agent,
+        "centroid": agent_centroid_m,
+        "yaw": agent_yaw_rad,
+        "extent": agent_extent_m,
+    }
+
+
+
+def generate_agent_sample_tl_future(
+    state_index: int,
+    frames: np.ndarray,
+    agents: np.ndarray,
+    tl_faces: np.ndarray,
+    selected_track_id: Optional[int],
+    render_context: RenderContext,
+    history_num_frames: int,
+    history_step_size: int,
+    future_num_frames: int,
+    future_step_size: int,
+    filter_agents_threshold: float,
+    rasterizer: Optional[Rasterizer] = None,
+    perturbation: Optional[Perturbation] = None,
+) -> dict:
+    """Generates the inputs and targets to train a deep prediction model. A deep prediction model takes as input
+    the state of the world (here: an image we will call the "raster"), and outputs where that agent will be some
+    seconds into the future.
+
+    This function has a lot of arguments and is intended for internal use, you should try to use higher level classes
+    and partials that use this function.
+
+    Args:
+        state_index (int): The anchor frame index, i.e. the "current" timestep in the scene
+        frames (np.ndarray): The scene frames array, can be numpy array or a zarr array
+        agents (np.ndarray): The full agents array, can be numpy array or a zarr array
+        tl_faces (np.ndarray): The full traffic light faces array, can be numpy array or a zarr array
+        selected_track_id (Optional[int]): Either None for AV, or the ID of an agent that you want to
+        predict the future of. This agent is centered in the raster and the returned targets are derived from
+        their future states.
+        raster_size (Tuple[int, int]): Desired output raster dimensions
+        pixel_size (np.ndarray): Size of one pixel in the real world
+        ego_center (np.ndarray): Where in the raster to draw the ego, [0.5,0.5] would be the center
+        history_num_frames (int): Amount of history frames to draw into the rasters
+        history_step_size (int): Steps to take between frames, can be used to subsample history frames
+        future_num_frames (int): Amount of history frames to draw into the rasters
+        future_step_size (int): Steps to take between targets into the future
+        filter_agents_threshold (float): Value between 0 and 1 to use as cutoff value for agent filtering
+        based on their probability of being a relevant agent
+        rasterizer (Optional[Rasterizer]): Rasterizer of some sort that draws a map image
+        perturbation (Optional[Perturbation]): Object that perturbs the input and targets, used
+    to train models that can recover from slight divergence from training set data
+
+    Raises:
+        ValueError: A ValueError is returned if the specified ``selected_track_id`` is not present in the scene
+        or was filtered by applying the ``filter_agent_threshold`` probability filtering.
+
+    Returns:
+        dict: a dict object with the raster array, the future offset coordinates (meters),
+        the future yaw angular offset, the future_availability as a binary mask
+    """
+    #  the history slice is ordered starting from the latest frame and goes backward in time., ex. slice(100, 91, -2)
+    history_slice = get_history_slice(state_index, history_num_frames, history_step_size, include_current_state=True)
+    future_slice = get_future_slice(state_index, future_num_frames, future_step_size)
+
+    history_frames = frames[history_slice].copy()  # copy() required if the object is a np.ndarray
+    future_frames = frames[future_slice].copy()
+
+    sorted_frames = np.concatenate((history_frames[::-1], future_frames))  # from past to future
+
+    # get agents (past and future)
+    agent_slice = get_agents_slice_from_frames(sorted_frames[0], sorted_frames[-1])
+    agents = agents[agent_slice].copy()  # this is the minimum slice of agents we need
+    history_frames["agent_index_interval"] -= agent_slice.start  # sync interval with the agents array
+    future_frames["agent_index_interval"] -= agent_slice.start  # sync interval with the agents array
+    history_agents = filter_agents_by_frames(history_frames, agents)
+    future_agents = filter_agents_by_frames(future_frames, agents)
+
+    #tl_slice = get_tl_faces_slice_from_frames(history_frames[-1], history_frames[0])  # -1 is the farthest
+    tl_slice = get_tl_faces_slice_from_frames(future_frames[0], future_frames[-1])  
+
+    # sync interval with the traffic light faces array
+    history_frames["traffic_light_faces_index_interval"] -= tl_slice.start
+    #history_tl_faces = filter_tl_faces_by_frames(history_frames, tl_faces[tl_slice].copy())
+    history_tl_faces = filter_tl_faces_by_frames(future_frames, tl_faces[tl_slice].copy())
+
+    if perturbation is not None:
+        history_frames, future_frames = perturbation.perturb(
+            history_frames=history_frames, future_frames=future_frames
+        )
+
+    # State you want to predict the future of.
+    cur_frame = history_frames[0]
+    cur_agents = history_agents[0]
+
+    if selected_track_id is None:
+        agent_centroid_m = cur_frame["ego_translation"][:2]
+        agent_yaw_rad = rotation33_as_yaw(cur_frame["ego_rotation"])
+        agent_extent_m = np.asarray((EGO_EXTENT_LENGTH, EGO_EXTENT_WIDTH, EGO_EXTENT_HEIGHT))
+        selected_agent = None
+    else:
+        # this will raise IndexError if the agent is not in the frame or under agent-threshold
+        # this is a strict error, we cannot recover from this situation
+        try:
+            agent = filter_agents_by_track_id(
+                filter_agents_by_labels(cur_agents, filter_agents_threshold), selected_track_id
+            )[0]
+        except IndexError:
+            raise ValueError(f" track_id {selected_track_id} not in frame or below threshold")
+        agent_centroid_m = agent["centroid"]
+        agent_yaw_rad = float(agent["yaw"])
+        agent_extent_m = agent["extent"]
+        selected_agent = agent
+
+    input_im = (
+        None
+        if not rasterizer
+        else rasterizer.rasterize(history_frames, history_agents, history_tl_faces[-len(history_frames):], selected_agent)
+    )
+
+    world_from_agent = compute_agent_pose(agent_centroid_m, agent_yaw_rad)
+    agent_from_world = np.linalg.inv(world_from_agent)
+    raster_from_world = render_context.raster_from_world(agent_centroid_m, agent_yaw_rad)
+
+    future_coords_offset, future_yaws_offset, future_availability = _create_targets_for_deep_prediction(
+        future_num_frames, future_frames, selected_track_id, future_agents, agent_from_world, agent_yaw_rad
+    )
+
+    # history_num_frames + 1 because it also includes the current frame
+    history_coords_offset, history_yaws_offset, history_availability = _create_targets_for_deep_prediction(
+        history_num_frames + 1, history_frames, selected_track_id, history_agents, agent_from_world, agent_yaw_rad
+    )
+
+    return {
+        "image": input_im,
+        "target_positions": future_coords_offset,
+        "target_yaws": future_yaws_offset,
+        "target_availabilities": future_availability,
+        "history_positions": history_coords_offset,
+        "history_yaws": history_yaws_offset,
+        "history_availabilities": history_availability,
+        "world_to_image": raster_from_world,  # TODO deprecate
+        "raster_from_agent": raster_from_world @ world_from_agent,
+        "raster_from_world": raster_from_world,
+        "agent_from_world": agent_from_world,
+        "world_from_agent": world_from_agent,
+        "centroid": agent_centroid_m,
+        "yaw": agent_yaw_rad,
+        "extent": agent_extent_m,
+    }
 
 
 def generate_agent_sample_random_ego_center(
@@ -696,7 +1048,12 @@ def augment_img(img, transforms):
 ##############################################
 
 def get_dataset(cfg):
-    ds = AgentDatasetRandomEgoCentre if 'random_ego_center' in cfg['raster_params'] and cfg['raster_params']['random_ego_center'] else AgentDatasetCF
+    if 'random_ego_center' in cfg['raster_params'] and cfg['raster_params']['random_ego_center']:
+        ds = AgentDatasetRandomEgoCentre 
+    elif 'tl_persistence' in cfg['raster_params'] and cfg['raster_params']['tl_persistence']:
+        ds = AgentDatasetTL
+    else:
+        ds = AgentDatasetCF
     return ds
 
 
@@ -806,11 +1163,11 @@ class MotionPredictDataset(Dataset):
         idx = list(range(len(self.ds)))
         random.shuffle(idx)
 
-        print('Shuffling scene indices...')
-        self.ds.scene_indices = [self.ds.scene_indices[i] for i in tqdm(idx)]
-        self.ds.frame_indices = [self.ds.frame_indices[i] for i in tqdm(idx)]
-        self.ds.timestamps = [self.ds.timestamps[i] for i in tqdm(idx)]
-        self.ds.track_ids = [self.ds.track_ids[i] for i in tqdm(idx)]
+        if DEBUG: print('Shuffling scene indices...')
+        self.ds.scene_indices = [self.ds.scene_indices[i] for i in idx]
+        self.ds.frame_indices = [self.ds.frame_indices[i] for i in idx]
+        self.ds.timestamps = [self.ds.timestamps[i] for i in idx]
+        self.ds.track_ids = [self.ds.track_ids[i] for i in idx]
 
         # Within each scene, number the agents/frames 0 -> n
         count = np.unique(self.ds.scene_indices, return_counts=1)[1]
@@ -1114,6 +1471,43 @@ def double_channel_agents_ego_map_transform(dataset, idx, args_dict, cfg, str_da
     im_ego_history = np.sum(im_ego_history[:, :, history_idx], axis=-1)
 
     im_reduced = np.stack([im_agents_history, im_agents_current, im_ego_history, im_ego_current, im_map], axis=-1)
+
+    transforms = make_transform(args_dict['TRANSFORMS']) if 'TRANSFORMS' in args_dict else None
+    im_reduced = augment_img(im_reduced, transforms)
+
+    x = numpy_to_torch(im_reduced)
+
+    y, transform_matrix, centroid, ego_center = create_y_transform_tensor(data, cfg)
+
+    return [x, transform_matrix, centroid, ego_center], y, int(data['timestamp']), int(data['track_id'])
+
+
+def double_channel_agents_ego_map_tl(dataset, idx, args_dict, cfg, str_data_loader, info=False, info_dict=None):
+    """
+    double_channel_agents_ego_map tailored to multi mode output model 
+    including centroid and raster_from_world matrix
+    """
+    if info:
+        n_input_channels = 6 # Each ego/agent is condensed into two channels, each map is condensed into 1, traffic light persistence as 1
+        n_output = info_dict['n_modes'] + (info_dict['future_num_frames'] * 3 * info_dict['n_modes']) # n_confs + (future_num_frames * (x, y, yaws) * modes)
+        return n_input_channels, n_output
+
+    data = check_load(get_cache_filename(idx, args_dict, cfg, 'double_channel_agents_ego_map_tl', str_data_loader),
+                      return_idx, idx, CREATE_CACHE, (dataset, idx))
+
+    im = data["image"].transpose(1, 2, 0)
+
+    n, im_map, im_agents_history, im_agents_current, im_ego_history, im_ego_current, im_tl = split_im_tl(im)
+
+    history_idx = generate_history_idx(n - 1, args_dict['sample_history_num_frames'], args_dict['SHUFFLE'])
+
+    im_map = np.sum(im_map, axis=-1)
+
+    im_agents_history = np.sum(im_agents_history[:, :, history_idx], axis=-1)
+
+    im_ego_history = np.sum(im_ego_history[:, :, history_idx], axis=-1)
+
+    im_reduced = np.stack([im_agents_history, im_agents_current, im_ego_history, im_ego_current, im_map, im_tl], axis=-1)
 
     transforms = make_transform(args_dict['TRANSFORMS']) if 'TRANSFORMS' in args_dict else None
     im_reduced = augment_img(im_reduced, transforms)
@@ -1475,7 +1869,7 @@ def create_loader(clsDataset, fn_rasterizer, fn_create, cfg, args_dict, str_load
 
     # Checks:
     #_dataset.plot_index(0)
-    _dataset[0]
+    for i in range(1): _dataset[i]
 
     if isinstance(str_loader, (list, tuple)):
         loader = DataLoader(_dataset,
@@ -1577,7 +1971,7 @@ def torch_neg_multi_log_likelihood(gt, pred, confidences, avails, use_weights=Fa
 
     if use_weights:
         weights = torch.ones_like(avails)
-        weights[:, :, -10:, :] = 4.0
+        weights[:, :, :-10, :] = 0.5 # sum(weights for last 10 points**2) = 10 => 40 * w**2 = 10 => w = sqrt(10/40) = 0.5
         avails = avails * weights
 
     # error (batch_size, num_modes, future_len), reduce coords and use availability
@@ -2387,36 +2781,18 @@ if __name__ == '__main__':
                                    rasterizer_fn=build_rasterizer)
     """
 
-    chop_indices = list(range(10, 201, 10))
-    chop_indices = [10, 30, 40, 60, 70, 90, 100, 120, 130, 150, 160, 180, 200]
-
-    run_tests_multi_motion_predict(n_epochs=1000, in_size=196, batch_size=256,
-                                   samples_per_epoch=17000 // len(chop_indices),
-                                   sample_history_num_frames=7, history_num_frames=7, history_step_size=1, future_num_frames=50,
-                                   group_scenes=False, weight_by_agent_count=7,
-                                   clsTrainDataset=MultiMotionPredictDataset,
-                                   clsValDataset=MotionPredictDataset,
-                                   clsModel=LyftResnet18Transform,
-                                   fit_fn='fit_fastai_transform', val_fn='test_transform',
-                                   loss_fn=neg_log_likelihood_transform,
-                                   aug='none',
-                                   loader_fn=double_channel_agents_ego_map_dayhour,
-                                   cfg_fn=create_config_multi_train_chopped_lite,
-                                   str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
-                                   rasterizer_fn=build_rasterizer)
-
-    run_forecast_multi_motion_predict(n_epochs=1000, in_size=196, batch_size=256,
-                                   samples_per_epoch=17000 // len(chop_indices),
-                                   sample_history_num_frames=7, history_num_frames=7, history_step_size=1,
+    run_tests_multi_motion_predict(n_epochs=600, in_size=128, batch_size=256,
+                                   samples_per_epoch=17000,
+                                   sample_history_num_frames=5, history_num_frames=5, history_step_size=1,
                                    future_num_frames=50,
-                                   group_scenes=False, weight_by_agent_count=7,
+                                   group_scenes=False, weight_by_agent_count=0,
                                    clsTrainDataset=MultiMotionPredictDataset,
                                    clsValDataset=MotionPredictDataset,
                                    clsModel=LyftResnet18Transform,
                                    fit_fn='fit_fastai_transform', val_fn='test_transform',
                                    loss_fn=neg_log_likelihood_transform,
                                    aug='none',
-                                   loader_fn=double_channel_agents_ego_map_dayhour,
-                                   cfg_fn=create_config_multi_train_chopped_lite,
-                                   str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
-                                   rasterizer_fn=build_rasterizer)
+                                   loader_fn=double_channel_agents_ego_map_tl,
+                                   cfg_fn=create_config_tl,
+                                   str_train_loaders=['train_data_loader_100'],
+                                   rasterizer_fn=build_rasterizer_tl)
