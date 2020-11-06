@@ -1519,6 +1519,45 @@ def double_channel_agents_ego_map_tl(dataset, idx, args_dict, cfg, str_data_load
     return [x, transform_matrix, centroid, ego_center], y, int(data['timestamp']), int(data['track_id'])
 
 
+def double_channel_agents_ego_map_tl_50(dataset, idx, args_dict, cfg, str_data_loader, info=False, info_dict=None):
+    """
+    double_channel_agents_ego_map tailored to multi mode output model
+    including centroid and raster_from_world matrix
+    """
+    if info:
+        n_input_channels = 6 # Each ego/agent is condensed into two channels, each map is condensed into 1, traffic light persistence as 1
+        n_output = info_dict['n_modes'] + (info_dict['future_num_frames'] * 3 * info_dict['n_modes']) # n_confs + (future_num_frames * (x, y, yaws) * modes)
+        return n_input_channels, n_output
+
+    data = check_load(get_cache_filename(idx, args_dict, cfg, 'double_channel_agents_ego_map_tl', str_data_loader),
+                      return_idx, idx, CREATE_CACHE, (dataset, idx))
+
+    im = data["image"].transpose(1, 2, 0)
+
+    n, im_map, im_agents_history, im_agents_current, im_ego_history, im_ego_current, im_tl = split_im_tl(im)
+
+    history_idx = generate_history_idx(n - 1, args_dict['sample_history_num_frames'], args_dict['SHUFFLE'])
+
+    im_map = np.sum(im_map, axis=-1)
+
+    im_tl = (im_tl < 50).astype(np.int)
+
+    im_agents_history = np.sum(im_agents_history[:, :, history_idx], axis=-1)
+
+    im_ego_history = np.sum(im_ego_history[:, :, history_idx], axis=-1)
+
+    im_reduced = np.stack([im_agents_history, im_agents_current, im_ego_history, im_ego_current, im_map, im_tl], axis=-1)
+
+    transforms = make_transform(args_dict['TRANSFORMS']) if 'TRANSFORMS' in args_dict else None
+    im_reduced = augment_img(im_reduced, transforms)
+
+    x = numpy_to_torch(im_reduced)
+
+    y, transform_matrix, centroid, ego_center = create_y_transform_tensor(data, cfg)
+
+    return [x, transform_matrix, centroid, ego_center], y, int(data['timestamp']), int(data['track_id'])
+
+
 def double_channel_agents_ego_map_avg_transform(dataset, idx, args_dict, cfg, str_data_loader, info=False, info_dict=None):
     """
     double_channel_agents_ego_map tailored to multi mode output model 
@@ -2763,26 +2802,11 @@ def test_agent_dataset(str_loader):
 
 
 if __name__ == '__main__':
-    """
-    print('NEW L5KIT, NO AUG, FULL DATASET')
 
-    run_tests_multi_motion_predict(n_epochs=200, in_size=128, batch_size=256, samples_per_epoch=17000,
-                                   sample_history_num_frames=5, history_num_frames=5, future_num_frames=50,
-                                   group_scenes=False, weight_by_agent_count=0,
-                                   clsTrainDataset=FullMotionPredictDataset,
-                                   clsValDataset=MotionPredictDataset,
-                                   clsModel=LyftResnet18Transform,
-                                   fit_fn='fit_fastai_transform', val_fn='test_transform',
-                                   loss_fn=neg_log_likelihood_transform,
-                                   aug='none',
-                                   loader_fn=double_channel_agents_ego_map_transform,
-                                   cfg_fn=create_config_train_full,
-                                   str_train_loaders='train_data_loader',
-                                   rasterizer_fn=build_rasterizer)
-    """
+    chop_indices = [100]#, 110, 130, 150, 180]#list(range(10, 201, 20))
 
     run_tests_multi_motion_predict(n_epochs=600, in_size=128, batch_size=256,
-                                   samples_per_epoch=17000,
+                                   samples_per_epoch=17000//len(chop_indices),
                                    sample_history_num_frames=5, history_num_frames=5, history_step_size=1,
                                    future_num_frames=50,
                                    group_scenes=False, weight_by_agent_count=0,
@@ -2792,7 +2816,7 @@ if __name__ == '__main__':
                                    fit_fn='fit_fastai_transform', val_fn='test_transform',
                                    loss_fn=neg_log_likelihood_transform,
                                    aug='none',
-                                   loader_fn=double_channel_agents_ego_map_tl,
+                                   loader_fn=double_channel_agents_ego_map_tl_50,
                                    cfg_fn=create_config_tl,
-                                   str_train_loaders=['train_data_loader_100'],
+                                   str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
                                    rasterizer_fn=build_rasterizer_tl)

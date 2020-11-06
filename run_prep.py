@@ -86,7 +86,7 @@ def create_chopped_dataset_lite(
         str: the parent folder of the new datam
     """
     zarr_path = Path(zarr_path)
-    dest_path = zarr_path.parent / f"{zarr_path.stem}_chopped_{num_frames_to_copy}_lite"
+    dest_path = zarr_path.parent / f"{zarr_path.stem}_chopped_{num_frames_to_copy}_lite_{history_num_frames}"
     chopped_path = dest_path / zarr_path.name
     gt_path = dest_path / "gt.csv"
     mask_chopped_path = dest_path / "mask"
@@ -274,7 +274,7 @@ def create_tl_dataset(zarr_path: str, dataset_path: str) -> None:
 # DATA PREP
 ######################################
 
-def save_chopped_ds_lite(cfg, str_data_loader='train_data_loader', num_frames_to_chop=100, min_future_steps=10, history_num_frames=10):
+def save_chopped_ds_lite(cfg, str_data_loader='train_data_loader', num_frames_to_chop=100, history_num_frames=10, min_future_steps=10):
 
     dm = LocalDataManager(None)
     chopped_ds_path = create_chopped_dataset_lite(dm.require(cfg[str_data_loader]["key"]), cfg["raster_params"]["filter_agents_threshold"], 
@@ -283,11 +283,11 @@ def save_chopped_ds_lite(cfg, str_data_loader='train_data_loader', num_frames_to
     return chopped_ds_path
 
 
-def save_multi_datasets(config = create_prep_config(), str_data_loader='train_data_loader', num_frames_to_chop=[30, 100, 180]):
+def save_multi_datasets(config = create_prep_config(), str_data_loader='train_data_loader', num_frames_to_chop=[30, 100, 180], history_num_frames=10):
 
     with ThreadPoolExecutor(max_workers=NUM_WORKERS) as e:
         for n in num_frames_to_chop:
-            e.submit(save_chopped_ds_lite, config, str_data_loader, n)
+            e.submit(save_chopped_ds_lite, config, str_data_loader, n, history_num_frames)
 
 
 def save_traffic_light_dataset(config=create_prep_config(), str_data_loader='train_data_loader'):
@@ -307,10 +307,9 @@ if __name__ == '__main__':
     """
 
 
-    chop_indices = list(range(10, 201, 10))
+    chop_indices = [120, 140, 160, 180, 200]
 
-    chop_indices = [15]
-    for str_loader in ['train_data_loader', 'val_data_loader']:
+    for str_loader in ['train_data_loader']:
         for n in chop_indices:
             print(' : '.join((str_loader, str(n))))
-            save_multi_datasets(str_data_loader=str_loader, num_frames_to_chop=[n] if not isinstance(n, list) else n)
+            save_multi_datasets(str_data_loader=str_loader, num_frames_to_chop=[n] if not isinstance(n, list) else n, history_num_frames=100)
