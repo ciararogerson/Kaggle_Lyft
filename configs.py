@@ -516,9 +516,9 @@ def create_config_multi_train_chopped_lite_100(str_network='', cfg_model_params=
         
         
         'train_data_loader_100': {
-            'key': 'scenes/train_full_chopped_100_lite/train_full.zarr',
-            'gt_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_100_lite/gt.csv'),
-            'mask_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_100_lite/mask.npz'),
+            'key': 'scenes/train_full_chopped_100/train_full.zarr',
+            'gt_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_100/gt.csv'),
+            'mask_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_100/mask.npz'),
             'batch_size': batch_size,
             'shuffle': True,
             'num_workers': num_workers,
@@ -969,59 +969,6 @@ def create_config_tl(str_network='', cfg_model_params=None, input_size=224, pixe
             'dataset_meta_key': 'meta.json',
             'filter_agents_threshold': 0.5
         },
-        
-        'train_data_loader_10': {
-            'key': 'scenes/train_full_chopped_10_CF/train_full.zarr',
-            'gt_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_10_CF/gt.csv'),
-            'mask_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_10_CF/mask.npz'),
-            'batch_size': batch_size,
-            'shuffle': True,
-            'num_workers': num_workers,
-            'samples_per_epoch': samples_per_epoch
-        },
-
-
-        'train_data_loader_30': {
-            'key': 'scenes/train_full_chopped_30_CF/train_full.zarr',
-            'gt_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_30_CF/gt.csv'),
-            'mask_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_30_CF/mask.npz'),
-            'batch_size': batch_size,
-            'shuffle': True,
-            'num_workers': num_workers,
-            'samples_per_epoch': samples_per_epoch
-        },
-
-
-        'train_data_loader_50': {
-            'key': 'scenes/train_full_chopped_50/train_full.zarr',
-            'gt_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_50/gt.csv'),
-            'mask_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_50/mask.npz'),
-            'batch_size': batch_size,
-            'shuffle': True,
-            'num_workers': num_workers,
-            'samples_per_epoch': samples_per_epoch
-        },
-
-        'train_data_loader_70': {
-            'key': 'scenes/train_full_chopped_70_CF/train_full.zarr',
-            'gt_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_70_CF/gt.csv'),
-            'mask_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_70_CF/mask.npz'),
-            'batch_size': batch_size,
-            'shuffle': True,
-            'num_workers': num_workers,
-            'samples_per_epoch': samples_per_epoch
-        },
-
-
-        'train_data_loader_90': {
-            'key': 'scenes/train_full_chopped_90_CF/train_full.zarr',
-            'gt_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_90_CF/gt.csv'),
-            'mask_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_90_CF/mask.npz'),
-            'batch_size': batch_size,
-            'shuffle': True,
-            'num_workers': num_workers,
-            'samples_per_epoch': samples_per_epoch
-        },
 
         'train_data_loader_100': {
             'key': 'scenes/train_full_chopped_100/train_full.zarr',
@@ -1033,10 +980,20 @@ def create_config_tl(str_network='', cfg_model_params=None, input_size=224, pixe
             'samples_per_epoch': samples_per_epoch
         },
 
-        'train_data_loader_110': {
-            'key': 'scenes/train_full_chopped_110_CF/train_full.zarr',
-            'gt_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_110_CF/gt.csv'),
-            'mask_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_110_CF/mask.npz'),
+                'train_data_loader_120': {
+            'key': 'scenes/train_full_chopped_120_lite_100/train_full.zarr',
+            'gt_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_120_lite_100/gt.csv'),
+            'mask_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_120_lite_100/mask.npz'),
+            'batch_size': batch_size,
+            'shuffle': True,
+            'num_workers': num_workers,
+            'samples_per_epoch': samples_per_epoch
+        },
+
+        'train_data_loader_140': {
+            'key': 'scenes/train_full_chopped_140_lite_100/train_full.zarr',
+            'gt_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_140_lite_100/gt.csv'),
+            'mask_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_140_lite_100/mask.npz'),
             'batch_size': batch_size,
             'shuffle': True,
             'num_workers': num_workers,
@@ -1044,21 +1001,10 @@ def create_config_tl(str_network='', cfg_model_params=None, input_size=224, pixe
         },
 
 
-        'train_data_loader_130': {
-            'key': 'scenes/train_full_chopped_130_CF/train_full.zarr',
-            'gt_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_130_CF/gt.csv'),
-            'mask_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_130_CF/mask.npz'),
-            'batch_size': batch_size,
-            'shuffle': True,
-            'num_workers': num_workers,
-            'samples_per_epoch': samples_per_epoch
-        },
-
-
-        'train_data_loader_150': {
-            'key': 'scenes/train_full_chopped_150_CF/train_full.zarr',
-            'gt_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_150_CF/gt.csv'),
-            'mask_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_150_CF/mask.npz'),
+        'train_data_loader_160': {
+            'key': 'scenes/train_full_chopped_160_lite_100/train_full.zarr',
+            'gt_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_160_lite_100/gt.csv'),
+            'mask_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_160_lite_100/mask.npz'),
             'batch_size': batch_size,
             'shuffle': True,
             'num_workers': num_workers,
@@ -1067,9 +1013,9 @@ def create_config_tl(str_network='', cfg_model_params=None, input_size=224, pixe
 
 
         'train_data_loader_180': {
-            'key': 'scenes/train_full_chopped_180_CF/train_full.zarr',
-            'gt_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_180_CF/gt.csv'),
-            'mask_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_180_CF/mask.npz'),
+            'key': 'scenes/train_full_chopped_180_lite_100/train_full.zarr',
+            'gt_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_180_lite_100/gt.csv'),
+            'mask_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_180_lite_100/mask.npz'),
             'batch_size': batch_size,
             'shuffle': True,
             'num_workers': num_workers,
@@ -1078,9 +1024,9 @@ def create_config_tl(str_network='', cfg_model_params=None, input_size=224, pixe
 
 
         'train_data_loader_200': {
-            'key': 'scenes/train_full_chopped_200_CF/train_full.zarr',
-            'gt_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_200_CF/gt.csv'),
-            'mask_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_200_CF/mask.npz'),
+            'key': 'scenes/train_full_chopped_200_lite_100/train_full.zarr',
+            'gt_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_200_lite_100/gt.csv'),
+            'mask_path': os.path.join(BASE_DIR, 'scenes/train_full_chopped_200_lite_100/mask.npz'),
             'batch_size': batch_size,
             'shuffle': True,
             'num_workers': num_workers,
