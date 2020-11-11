@@ -22,6 +22,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
+from torch.optim.optimizer import Optimizer
 import torchvision.models as models
 from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
 from torchvision import utils
@@ -1639,6 +1640,53 @@ def double_channel_agents_ego_map_dayhour(dataset, idx, args_dict, cfg, str_data
     return [x, transform_matrix, centroid, ego_center], y, int(data['timestamp']), int(data['track_id'])
 
 
+def double_channel_agents_ego_map_dayhour_tl(dataset, idx, args_dict, cfg, str_data_loader, info=False, info_dict=None):
+    """
+    double_channel_agents_ego_map tailored to multi mode output model
+    including centroid and raster_from_world matrix.
+    Includes channel for traffic light persistence, and another for day/hour
+    """
+    if info:
+        n_input_channels = 7 # Each ego/agent is condensed into two channels, each map is condensed into 1, traffic light persistence + day hour
+        n_output = info_dict['n_modes'] + (info_dict['future_num_frames'] * 3 * info_dict['n_modes']) # n_confs + (future_num_frames * (x, y, yaws) * modes)
+        return n_input_channels, n_output
+
+    data = check_load(get_cache_filename(idx, args_dict, cfg, 'double_channel_agents_ego_map_dayhour_tl', str_data_loader),
+                      return_idx, idx, CREATE_CACHE, (dataset, idx))
+
+    im = data["image"].transpose(1, 2, 0)
+
+    n, im_map, im_agents_history, im_agents_current, im_ego_history, im_ego_current, im_tl = split_im_tl(im)
+
+    history_idx = generate_history_idx(n - 1, args_dict['sample_history_num_frames'], args_dict['SHUFFLE'])
+
+    im_map = np.sum(im_map, axis=-1)
+
+    im_tl = im_tl * 2
+
+    im_agents_history = np.sum(im_agents_history[:, :, history_idx], axis=-1)
+
+    im_ego_history = np.sum(im_ego_history[:, :, history_idx], axis=-1)
+
+    im_reduced = np.stack([im_agents_history, im_agents_current, im_ego_history, im_ego_current, im_map, im_tl], axis=-1)
+
+    transforms = make_transform(args_dict['TRANSFORMS']) if 'TRANSFORMS' in args_dict else []
+    im_reduced = augment_img(im_reduced, transforms)
+
+    _date = datetime.fromtimestamp(data['timestamp'] // 10**9)
+    weekday = _date.weekday()
+    hour = _date.hour
+    dayhour = 10 * (weekday + (hour/25))
+
+    im_reduced = np.concatenate([im_reduced, np.ones(im_reduced.shape[:2] + (1,)) * dayhour], axis=-1)
+
+    x = numpy_to_torch(im_reduced)
+
+    y, transform_matrix, centroid, ego_center = create_y_transform_tensor(data, cfg)
+
+    return [x, transform_matrix, centroid, ego_center], y, int(data['timestamp']), int(data['track_id'])
+
+
 def double_channel_agents_ego_map_coords(dataset, idx, args_dict, cfg, str_data_loader, info=False, info_dict=None):
     """
     double_channel_agents_ego_map tailored to multi mode output model 
@@ -2313,6 +2361,63 @@ class Network(object):
 
         return val_dict
 
+    def fit_fastai_ralamb(self, epochs, start_epoch=0, resample=True, loss_fn=neg_log_likelihood_transform):
+
+        data = DataBunch(train_dl=self.train_loader, valid_dl=self.val_loader)
+
+        checkpoint_path = os.path.splitext(self.model_checkpoint_path)[0]
+
+        learn = Learner(data,
+                        self.net,
+                        path=checkpoint_path,
+                        loss_func=loss_fn,
+                        opt_func = Over9000,
+                        metrics=[MultiModeNegLogLossTransform()]).to_fp16()
+        learn.clip_grad = 1.0
+        learn.split([self.net.head])
+        learn.unfreeze()
+    
+        learn_callbacks = [SaveModelCallback(learn, name=f'model', monitor='valid_loss')]
+
+        if resample:
+            class DataSamplingCallback(Callback):
+                def on_epoch_begin(self, **kwargs):
+                    learn.data.train_dl.dl.dataset.sample_ds()
+
+            learn_callbacks = learn_callbacks + [DataSamplingCallback()]
+
+        if hasattr(loss_fn, 'update'):
+            class LossUpdateCallback(Callback):
+                def on_epoch_begin(self, epoch: int, **kwargs):
+                    loss_fn.update(epoch)
+
+            learn_callbacks = learn_callbacks + [LossUpdateCallback()]
+
+        if self.init_model_weights_path is not None:
+            print(' '.join(('Loading weights from', self.init_model_weights_path)))
+            assert os.path.exists(self.init_model_weights_path)
+            learn.model = load_weights(learn.model, self.init_model_weights_path)
+
+        if start_epoch > 0:
+            assert os.path.exists(os.path.join(checkpoint_path, 'models', 'model.pth'))
+            learn.load(os.path.join(checkpoint_path, 'models', 'model'))
+
+        # learn.fit(epochs = epochs, lr=self.lr, callbacks=[SaveModelCallback(learn,name=f'model',monitor='auroc'),
+        #                                        ReduceLROnPlateauCallback(learn,monitor='valid_loss', factor=10, patience=3, min_lr = 1e-10)])
+        learn.fit_one_cycle(epochs, max_lr=self.lr, div_factor=100, pct_start=0.0, callbacks=learn_callbacks)
+        
+        # Load best weights
+        learn.load(os.path.join(checkpoint_path, 'models', 'model'))
+
+        self.net = learn.model.float()
+
+        self.save_state()
+
+        val_model_loss, val_dict = self.evaluate(self.val_loader, loss_fn, silent=True)
+        print('Val loss: ' + str(val_model_loss))
+
+        return val_dict
+
     def set_state(self, state):
 
         boo_train = True if state == 'train' else False
@@ -2418,6 +2523,279 @@ class LyftResnet18Transform(LyftResnet18Small):
         out = torch.cat([centroid, x_confs, x_orig.reshape(batch_size, -1), x_transform.reshape(batch_size, -1)], dim=-1)
 
         return out
+
+
+class LyftResnest50(nn.Module):
+
+    def __init__(self, cfg: Dict):
+        super().__init__()
+        self.cfg = cfg
+        self.generate_network()
+
+    def generate_network(self):
+        num_in_channels = self.cfg['model_params']['n_input_channels']
+
+        m = torch.hub.load('zhanghang1989/ResNeSt', 'resnest50_fast_1s1x64d', pretrained=True)
+
+        m.conv1[0] = nn.Conv2d(num_in_channels,
+                            m.conv1[0].out_channels,
+                            kernel_size=m.conv1[0].kernel_size,
+                            stride=m.conv1[0].stride,
+                            padding=m.conv1[0].padding,
+                            bias=False,
+                            )
+
+        self.backbone = nn.Sequential(*list(m.children())[:-1])
+
+        # This is 512 for resnet18 and resnet34;
+        # And it is 2048 for the other resnets
+        backbone_out_features = 2048
+
+        # X, Y coords for the future positions (output shape: Bx50x2)
+        num_targets = self.cfg['model_params']['n_output']
+
+        self.head = nn.Sequential(
+            nn.Linear(in_features=backbone_out_features, out_features=4096),
+            nn.Linear(4096, out_features=num_targets)
+        )
+
+        if USE_MULTI_GPU:
+            self.backbone = nn.DataParallel(self.backbone)
+            self.head = nn.DataParallel(self.head)
+
+        self.backbone = self.backbone.to(DEVICE)
+        self.head = self.head.to(DEVICE)
+
+
+    def forward(self, *_x):
+
+        x = _x[0]
+        world_from_agent = _x[1]
+        centroid = _x[2]
+        ego_center = _x[3]
+
+        batch_size = x.shape[0]
+        n_modes = self.cfg['model_params']['n_modes']
+        future_num_frames = self.cfg['model_params']['future_num_frames']
+
+        x = self.backbone(x)
+        x = torch.flatten(x, 1)
+        x = self.head(x)
+
+        # We predict img coordinates transforms directly from the model,
+        # but we also append original coordinates by calling reverse_transform_y() on the predictions.
+        x_confs = x[:, :n_modes]
+        x_transform = x[:, n_modes:].reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :, :2].float()
+        x_orig = reverse_transform_y(x_transform.clone(), centroid.float(), world_from_agent.float(), n_modes)
+ 
+        yaws = torch.ones((batch_size, n_modes, future_num_frames, 1)).to(DEVICE)
+
+        centroid = centroid.squeeze(1).float().to(DEVICE)
+
+        if x.dtype == torch.float16: 
+            x_transform = x_transform.half()
+            x_orig = x_orig.half()
+            yaws = yaws.half()
+            centroid = centroid.half()
+            
+        # For consistency with other models we include yaws as well as x, y coordinates
+        include_yaws = True
+        if include_yaws:
+            x_orig = torch.cat([x_orig, yaws], dim=-1)
+            x_transform = torch.cat([x_transform, yaws], dim=-1)
+        
+        out = torch.cat([centroid, x_confs, x_orig.reshape(batch_size, -1), x_transform.reshape(batch_size, -1)], dim=-1)
+
+        return out
+
+
+# RAdam + LARS
+class Lookahead(Optimizer):
+    def __init__(self, base_optimizer, alpha=0.5, k=6):
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError(f'Invalid slow update rate: {alpha}')
+        if not 1 <= k:
+            raise ValueError(f'Invalid lookahead steps: {k}')
+        defaults = dict(lookahead_alpha=alpha, lookahead_k=k, lookahead_step=0)
+        self.base_optimizer = base_optimizer
+        self.param_groups = self.base_optimizer.param_groups
+        self.defaults = base_optimizer.defaults
+        self.defaults.update(defaults)
+        self.state = defaultdict(dict)
+        # manually add our defaults to the param groups
+        for name, default in defaults.items():
+            for group in self.param_groups:
+                group.setdefault(name, default)
+
+    def update_slow(self, group):
+        for fast_p in group["params"]:
+            if fast_p.grad is None:
+                continue
+            param_state = self.state[fast_p]
+            if 'slow_buffer' not in param_state:
+                param_state['slow_buffer'] = torch.empty_like(fast_p.data)
+                param_state['slow_buffer'].copy_(fast_p.data)
+            slow = param_state['slow_buffer']
+            slow.add_(group['lookahead_alpha'], fast_p.data - slow)
+            fast_p.data.copy_(slow)
+
+    def sync_lookahead(self):
+        for group in self.param_groups:
+            self.update_slow(group)
+
+    def step(self, closure=None):
+        # print(self.k)
+        # assert id(self.param_groups) == id(self.base_optimizer.param_groups)
+        loss = self.base_optimizer.step(closure)
+        for group in self.param_groups:
+            group['lookahead_step'] += 1
+            if group['lookahead_step'] % group['lookahead_k'] == 0:
+                self.update_slow(group)
+        return loss
+
+    def state_dict(self):
+        fast_state_dict = self.base_optimizer.state_dict()
+        slow_state = {
+            (id(k) if isinstance(k, torch.Tensor) else k): v
+            for k, v in self.state.items()
+        }
+        fast_state = fast_state_dict['state']
+        param_groups = fast_state_dict['param_groups']
+        return {
+            'state': fast_state,
+            'slow_state': slow_state,
+            'param_groups': param_groups,
+        }
+
+    def load_state_dict(self, state_dict):
+        fast_state_dict = {
+            'state': state_dict['state'],
+            'param_groups': state_dict['param_groups'],
+        }
+        self.base_optimizer.load_state_dict(fast_state_dict)
+
+        # We want to restore the slow state, but share param_groups reference
+        # with base_optimizer. This is a bit redundant but least code
+        slow_state_new = False
+        if 'slow_state' not in state_dict:
+            print('Loading state_dict from optimizer without Lookahead applied.')
+            state_dict['slow_state'] = defaultdict(dict)
+            slow_state_new = True
+        slow_state_dict = {
+            'state': state_dict['slow_state'],
+            'param_groups': state_dict['param_groups'],  # this is pointless but saves code
+        }
+        super(Lookahead, self).load_state_dict(slow_state_dict)
+        self.param_groups = self.base_optimizer.param_groups  # make both ref same container
+        if slow_state_new:
+            # reapply defaults to catch missing lookahead specific ones
+            for name, default in self.defaults.items():
+                for group in self.param_groups:
+                    group.setdefault(name, default)
+
+
+class Ralamb(Optimizer):
+
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0):
+        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        self.buffer = [[None, None, None] for ind in range(10)]
+        super(Ralamb, self).__init__(params, defaults)
+
+    def __setstate__(self, state):
+        super(Ralamb, self).__setstate__(state)
+
+    def step(self, closure=None):
+
+        loss = None
+        if closure is not None:
+            loss = closure()
+
+        for group in self.param_groups:
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                grad = p.grad.data.float()
+                if grad.is_sparse:
+                    raise RuntimeError('Ralamb does not support sparse gradients')
+
+                p_data_fp32 = p.data.float()
+
+                state = self.state[p]
+
+                if len(state) == 0:
+                    state['step'] = 0
+                    state['exp_avg'] = torch.zeros_like(p_data_fp32)
+                    state['exp_avg_sq'] = torch.zeros_like(p_data_fp32)
+                else:
+                    state['exp_avg'] = state['exp_avg'].type_as(p_data_fp32)
+                    state['exp_avg_sq'] = state['exp_avg_sq'].type_as(p_data_fp32)
+
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                beta1, beta2 = group['betas']
+
+                # Decay the first and second moment running average coefficient
+                # m_t
+                exp_avg.mul_(beta1).add_(1 - beta1, grad)
+                # v_t
+                exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, grad, grad)
+
+                state['step'] += 1
+                buffered = self.buffer[int(state['step'] % 10)]
+
+                if state['step'] == buffered[0]:
+                    N_sma, radam_step_size = buffered[1], buffered[2]
+                else:
+                    buffered[0] = state['step']
+                    beta2_t = beta2 ** state['step']
+                    N_sma_max = 2 / (1 - beta2) - 1
+                    N_sma = N_sma_max - 2 * state['step'] * beta2_t / (1 - beta2_t)
+                    buffered[1] = N_sma
+
+                    # more conservative since it's an approximated value
+                    if N_sma >= 5:
+                        radam_step_size = math.sqrt(
+                            (1 - beta2_t) * (N_sma - 4) / (N_sma_max - 4) * (N_sma - 2) / N_sma * N_sma_max / (
+                                        N_sma_max - 2)) / (1 - beta1 ** state['step'])
+                    else:
+                        radam_step_size = 1.0 / (1 - beta1 ** state['step'])
+                    buffered[2] = radam_step_size
+
+                if group['weight_decay'] != 0:
+                    p_data_fp32.add_(-group['weight_decay'] * group['lr'], p_data_fp32)
+
+                # more conservative since it's an approximated value
+                radam_step = p_data_fp32.clone()
+                if N_sma >= 5:
+                    denom = exp_avg_sq.sqrt().add_(group['eps'])
+                    radam_step.addcdiv_(-radam_step_size * group['lr'], exp_avg, denom)
+                else:
+                    radam_step.add_(-radam_step_size * group['lr'], exp_avg)
+
+                radam_norm = radam_step.pow(2).sum().sqrt()
+                weight_norm = p.data.pow(2).sum().sqrt().clamp(0, 10)
+                if weight_norm == 0 or radam_norm == 0:
+                    trust_ratio = 1
+                else:
+                    trust_ratio = weight_norm / radam_norm
+
+                state['weight_norm'] = weight_norm
+                state['adam_norm'] = radam_norm
+                state['trust_ratio'] = trust_ratio
+
+                if N_sma >= 5:
+                    p_data_fp32.addcdiv_(-radam_step_size * group['lr'] * trust_ratio, exp_avg, denom)
+                else:
+                    p_data_fp32.add_(-radam_step_size * group['lr'] * trust_ratio, exp_avg)
+
+                p.data.copy_(p_data_fp32)
+
+        return loss
+
+
+def Over9000(params, alpha=0.5, k=6, *args, **kwargs):
+    ralamb = Ralamb(params, *args, **kwargs)
+    return Lookahead(ralamb, alpha, k)
 
 
 def clean_state_dict(state_dict):
@@ -2802,11 +3180,31 @@ def test_agent_dataset(str_loader):
 
 
 if __name__ == '__main__':
-
+    """
     chop_indices = [100, 120, 140, 160, 180, 200]
 
-    run_tests_multi_motion_predict(n_epochs=1000, in_size=224, batch_size=256,
-                                   samples_per_epoch=17000//len(chop_indices),
+    try:
+        run_tests_multi_motion_predict(n_epochs=1000, in_size=224, batch_size=256,
+                                       samples_per_epoch=17000//len(chop_indices),
+                                       sample_history_num_frames=10, history_num_frames=10, history_step_size=1,
+                                       future_num_frames=50,
+                                       group_scenes=False, weight_by_agent_count=0,
+                                       clsTrainDataset=MultiMotionPredictDataset,
+                                       clsValDataset=MotionPredictDataset,
+                                       clsModel=LyftResnet18Transform,
+                                       fit_fn='fit_fastai_transform', val_fn='test_transform',
+                                       loss_fn=neg_log_likelihood_transform,
+                                       aug='none',
+                                       init_model_weights_path=os.path.join(MODEL_DIR, 'chkpt_LyftResnet18Transform_build_rasterizer_tl_double_channel_agents_ego_map_tl_create_config_tl_neg_log_likelihood_transform_128_600_256_17000_1_5_50_3_False_0_resnet18_fit_fastai_transform_none__.pth'),
+                                       loader_fn=double_channel_agents_ego_map_tl,
+                                       cfg_fn=create_config_tl,
+                                       str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
+                                       rasterizer_fn=build_rasterizer_tl)
+    except:
+        print('error saving val')
+
+    run_forecast_multi_motion_predict(n_epochs=1000, in_size=224, batch_size=256,
+                                   samples_per_epoch=17000 // len(chop_indices),
                                    sample_history_num_frames=10, history_num_frames=10, history_step_size=1,
                                    future_num_frames=50,
                                    group_scenes=False, weight_by_agent_count=0,
@@ -2816,8 +3214,44 @@ if __name__ == '__main__':
                                    fit_fn='fit_fastai_transform', val_fn='test_transform',
                                    loss_fn=neg_log_likelihood_transform,
                                    aug='none',
-                                   init_model_weights_path=os.path.join(MODEL_DIR, 'chkpt_LyftResnet18Transform_build_rasterizer_tl_double_channel_agents_ego_map_tl_create_config_tl_neg_log_likelihood_transform_128_600_256_17000_1_5_50_3_False_0_resnet18_fit_fastai_transform_none__.pth'),
+                                   init_model_weights_path=os.path.join(MODEL_DIR,
+                                                                        'chkpt_LyftResnet18Transform_build_rasterizer_tl_double_channel_agents_ego_map_tl_create_config_tl_neg_log_likelihood_transform_128_600_256_17000_1_5_50_3_False_0_resnet18_fit_fastai_transform_none__.pth'),
                                    loader_fn=double_channel_agents_ego_map_tl,
+                                   cfg_fn=create_config_tl,
+                                   str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
+                                   rasterizer_fn=build_rasterizer_tl)
+    
+    """
+    chop_indices = [100, 120, 140, 160, 180, 200]#list(range(10, 201, 20))
+
+    run_tests_multi_motion_predict(n_epochs=1000, in_size=128, batch_size=256,
+                                   samples_per_epoch=17000 // len(chop_indices),
+                                   sample_history_num_frames=5, history_num_frames=5, history_step_size=1,
+                                   future_num_frames=50,
+                                   group_scenes=False, weight_by_agent_count=7,
+                                   clsTrainDataset=MultiMotionPredictDataset,
+                                   clsValDataset=MotionPredictDataset,
+                                   clsModel=LyftResnest50,
+                                   fit_fn='fit_fastai_ralamb', val_fn='test_transform',
+                                   loss_fn=neg_log_likelihood_transform,
+                                   aug='none',
+                                   loader_fn=double_channel_agents_ego_map_dayhour_tl,
+                                   cfg_fn=create_config_tl,
+                                   str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
+                                   rasterizer_fn=build_rasterizer_tl)
+
+    run_forecast_multi_motion_predict(n_epochs=1000, in_size=128, batch_size=256,
+                                   samples_per_epoch=17000 // len(chop_indices),
+                                   sample_history_num_frames=5, history_num_frames=5, history_step_size=1,
+                                   future_num_frames=50,
+                                   group_scenes=False, weight_by_agent_count=7,
+                                   clsTrainDataset=MultiMotionPredictDataset,
+                                   clsValDataset=MotionPredictDataset,
+                                   clsModel=LyftResnest50,
+                                   fit_fn='fit_fastai_ralamb', val_fn='test_transform',
+                                   loss_fn=neg_log_likelihood_transform,
+                                   aug='none',
+                                   loader_fn=double_channel_agents_ego_map_dayhour_tl,
                                    cfg_fn=create_config_tl,
                                    str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
                                    rasterizer_fn=build_rasterizer_tl)
