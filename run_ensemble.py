@@ -8,11 +8,13 @@ import os
 import random
 from timeit import default_timer as timer
 from tqdm import tqdm
-import scipy.optimize as optimize
+import scipy as sp
+import scipy.optimize
 import matplotlib.pyplot as plt
 import math
 from datetime import datetime
 from copy import deepcopy
+from functools import partial
 
 from l5kit.evaluation import write_pred_csv, read_gt_csv
 
@@ -30,12 +32,6 @@ os.environ['PYTHONHASHSEED'] = str(SEED)
 random.seed(SEED)
 np.random.seed(SEED)
 
-
-######################################
-# SET UP / GLOBALS
-######################################
-
-NUM_WORKERS = 16
 
 ######################################
 # ENSEMBLING FUNCTIONALITY
@@ -67,69 +63,55 @@ def numpy_neg_multi_log_likelihood(gt, pred, confidences, avails):
 
 def combine_predictions(predictions, weights):
     
-    predictions['preds'] = np.multiply(predictions['preds'], np.array(weights).reshape(-1, 1, 1, 1, 1))
-    predictions['preds'] = np.divide(np.sum(predictions['preds'], axis=0), np.sum(weights))
+    preds, confs = calc_weighted_ensemble(predictions['preds'], predictions['confs'], weights)
 
-    predictions['confs'] = np.multiply(predictions['confs'], np.array(weights).reshape(-1, 1, 1))
-    predictions['confs'] = np.divide(np.sum(predictions['confs'], axis=0), np.sum(weights))
+    predictions['preds'] = preds
+    predictions['confs'] = confs
     
     return predictions
 
 
-def weighted_nll(args_in): 
-    predictions, y, weights = args_in  
-    predictions = combine_predictions(predictions, weights)
-    return numpy_neg_multi_log_likelihood(y['truth'], predictions['preds'], predictions['confs'], y['avails'])
+def conf_weighted_nll(coefs, gt, avails, preds, confs):
+
+    p, c = calc_weighted_ensemble(preds, confs, coefs)
+
+    return numpy_neg_multi_log_likelihood(gt, p, c, avails)
 
 
-def opt_gridsearch_mp(predictions, y, weights, opt_fn):
+def calc_weighted_ensemble(preds, confs, alpha_weights):
 
-    n_weights = len(weights)
-    arg_list = [(predictions, y, weights[i]) for i in range(n_weights)]
-    results = execute_mp_map(opt_fn, arg_list, boo_async = True, display_iter = 10)
-    results = np.array(results)
+    alpha = alpha_weights[0]
+    weights = alpha_weights[1:]
 
-    return results
+    n, n_samples, n_modes = preds.shape[:3]
 
+    c = np.power(confs, alpha)
+    c = np.divide(c, np.sum(c, axis=-1)[:, :, None])
 
-def opt(predictions, y, weights_min, weights_max, steps=[0.2, 0.1, 0.05]):
+    weights = np.array(weights) / np.sum(weights)
+    w = np.multiply(np.ones((n, n_samples, n_modes)), weights.reshape(-1, 1, 1))
 
-    weights_working_min, weights_working_max = weights_min, weights_max
+    w = np.multiply(w, confs)
 
-    for step in steps:
+    pw = np.multiply(preds, w[:, :, :, None, None])
+    pw = np.divide(np.sum(pw, axis=0), np.sum(w, axis=0)[:, :, None, None])
 
-        _weights = [np.minimum(weights_max, np.arange(weights_min, weights_max + step, step)) for weights_min, weights_max in zip(weights_working_min, weights_working_max)]
+    cw = np.multiply(confs, w)
+    cw = np.divide(np.sum(cw, axis=0), np.sum(w, axis=0))
 
-        weights_combs = np.meshgrid(*_weights)
-        weights_combs = np.concatenate([x.ravel()[:, np.newaxis] for x in weights_combs], axis = 1)
-        weights_combs = weights_combs[np.sum(weights_combs, axis=1) > 0]
-        weights_combs = list(np.unique(weights_combs, axis=0))
-        
-        # Carry out your grid search
-        results = opt_gridsearch_mp(predictions, y, weights_combs, weighted_nll)
-        
-        # Find your optimal combs and reset working_min, working_max
-        min_index = np.argwhere(results == np.min(results))[0][0]
+    return pw, cw
+    
 
-        print(' '.join(('Step', str(step), 'Min NLL:', str(results[min_index]), str(weights_combs[min_index]))))
+def opt_partial(gt, avails, preds, confs, init_coefs=None, opt_fn=conf_weighted_nll):
 
-        weights_working_min = [x - step for x in weights_combs[min_index]]
-        weights_working_max = [x + step for x in weights_combs[min_index]]
+    if init_coefs is None:
+        # No conf impact and equal weights
+        init_coefs = [0] + [1] * preds.shape[0]
 
+    loss_partial = partial(opt_fn, gt=gt, avails=avails, preds=preds, confs=confs)
+    coef = sp.optimize.minimize(loss_partial, np.array(init_coefs), tol=1e-10)
 
-    # You now have your opt results
-    opt_weights = weights_combs[min_index]
-
-    p = combine_predictions(predictions.copy(), opt_weights)
-    opt_nll = numpy_neg_multi_log_likelihood(y['truth'], p['preds'], p['confs'], y['avails'])
-
-    base_p = combine_predictions(predictions.copy(), np.ones_like(opt_weights))
-
-    # Sanity check:
-    print(''.join(('predictions nll: ', str(numpy_neg_multi_log_likelihood(y['truth'], base_p['preds'], base_p['confs'], y['avails'])))))
-    print(''.join(('opt adj predictions nll: ', str(opt_nll))))
-
-    return opt_weights, opt_nll
+    return coef.x, coef.fun
 
 
 def get_column_names():
@@ -227,15 +209,14 @@ def estimate_ensemble(sub_paths):
 
     n = predictions['preds'].shape[0]
 
-    base_p = combine_predictions(deepcopy(predictions), np.ones((n,)))
+    base_p = combine_predictions(deepcopy(predictions), np.array([0] + [1.]*n))
     orig_nlls = [numpy_neg_multi_log_likelihood(y['truth'], predictions['preds'][i], predictions['confs'][i], y['avails']) for i in range(n)]
     avg_nll = numpy_neg_multi_log_likelihood(y['truth'], base_p['preds'], base_p['confs'], y['avails'])
-    print(''.join(('Original nlls: ', str(orig_nlls))))
-    print(''.join(('Avg nlls: ', str(avg_nll))))
 
-    weights, opt_nll = opt(predictions, y, weights_min=[0]*n, weights_max=[1.0]*n)
+    weights, opt_nll = opt_partial(y['truth'], y['avails'], predictions['preds'], predictions['confs'])
 
     print('*********************************************************************************')
+    print(' : '.join(('weights', 'opt nll', 'avg nll', 'orig_nlls')))
     print(' : '.join((str(weights), str(opt_nll), str(avg_nll), str(orig_nlls))))
     print('*********************************************************************************')
 
@@ -276,7 +257,7 @@ def generate_ensemble_submission(submission_paths, weights):
 
     ensembled_predictions = combine_predictions(deepcopy(predictions), weights)
 
-    write_pred_csv(os.path.join(SUBMISSIONS_DIR, 'submission.csv'), 
+    write_pred_csv(os.path.join(SUBMISSIONS_DIR, '_'.join(('submission', datetime.now().strftime('%Y%m%d%H%M%S'), '.csv'))), 
                     subs[0]['timestamps'].values, 
                     subs[0]['track_ids'].values, 
                     ensembled_predictions['preds'], 
@@ -286,7 +267,7 @@ def generate_ensemble_submission(submission_paths, weights):
 def generate_ensemble_prediction(submission_paths, weights=None):
 
     if weights is None:
-        weights = [1.] * len(submission_paths)
+        weights = [0] + [1.] * len(submission_paths)
 
     generate_ensemble_submission(submission_paths, weights)
 
@@ -297,4 +278,9 @@ if __name__ == '__main__':
     val_paths = [os.path.join(DATA_DIR, 'val_test_transform_LyftResnet18Transform_double_channel_agents_ego_map_dayhour_create_config_train_chopped_neg_log_likelihood_transform_320_0.5_0.5_0.25_0.5_600_256_17000_10_10_50_3_40_resnet18_fit_fastai_transform_heavycoarsedropoutblur__.pkl'),
                 os.path.join(DATA_DIR, 'val_test_transform_LyftResnet18Transform_double_channel_agents_ego_map_transform_create_config_train_chopped_randego_neg_log_likelihood_transform_320_0.5_0.5_0.25_0.5_600_256_17000_5_5_50_3_40_resnet18_fit_fastai_transform_none__.pkl')]
     
-    estimate_validation_weights(val_paths)
+    weights, nll = estimate_validation_weights(val_paths)
+
+    sub_paths = [os.path.join(SUBMISSIONS_DIR, 'test_test_transform_LyftResnet18Transform_double_channel_agents_ego_map_dayhour_create_config_train_chopped_neg_log_likelihood_transform_320_0.5_0.5_0.25_0.5_600_256_17000_10_10_50_3_40_resnet18_fit_fastai_transform_heavycoarsedropoutblur__.csv'),
+                os.path.join(SUBMISSIONS_DIR, 'test_test_transform_LyftResnet18Transform_double_channel_agents_ego_map_transform_create_config_train_chopped_randego_neg_log_likelihood_transform_320_0.5_0.5_0.25_0.5_600_256_17000_5_5_50_3_40_resnet18_fit_fastai_transform_none__.csv')]
+
+    generate_ensemble_submission(sub_paths, weights)

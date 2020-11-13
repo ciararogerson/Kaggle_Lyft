@@ -2260,6 +2260,72 @@ class Network(object):
 
         return test_dict
 
+    def test_flips(self, data_loader, silent=False, df_only=True):
+
+        self.set_state('eval')
+
+        assert hasattr(data_loader.dataset, 'add_output'), 'data_loader must have addtional timestamp/track_id output'
+        add_output = data_loader.dataset.add_output
+        data_loader.dataset.add_output = True
+
+        # Added to ensure when running for val dataset it uses the whole thing
+        orig_sample_size = data_loader.dataset.sample_size
+        if data_loader.dataset.sample_size < len(data_loader.dataset.ds):
+            print(' '.join(('Setting data_loader sample size from', str(orig_sample_size), 'to', str(len(data_loader.dataset.ds)))))
+            data_loader.dataset.sample_size = len(data_loader.dataset.ds)
+
+        y_pred = []
+        y_conf = []
+        timestamps = []
+        track_ids = []
+        centroids = []
+
+        with tqdm(total=len(data_loader), desc="Test transform prediction", leave=False, disable=silent) as pbar:
+
+            for data in data_loader:
+
+                with torch.no_grad():
+
+                    x = data[0]
+                    pseudo_y = data[1]
+                    timestamp = data[2]
+                    track_id = data[3]
+
+                    out = self.predict_net(_x)
+
+                    pred_orig, pred_transform, truth_orig, truth_transform, conf, mask, batch_size, n_modes, future_num_frames, centroid = data_transform_to_modes(out, pseudo_y)
+
+                    pred_orig = pred_orig.reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :, :2] 
+
+                    _x = [x[0].clone().flip(-2)] + x[1:]
+                        
+                    out_flip = self.predict_net(_x)
+
+                    pred_flip, _, _, _, conf_flip, _, _, _, _, _ = data_transform_to_modes(out_flip, pseudo_y)
+
+                    pred_flip = pred_flip.reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :, :2] 
+                    pred_flip[:, :, :, -1] = pred_flip[:, :, :, -1] * -1
+
+                    # Shape predictions correctly and take just the first two (target_x, target_y)
+                    pred = (pred_orig + pred_flip) / 2
+                    conf = (conf + conf_flip) / 2
+
+                y_pred.append(pred.detach().cpu().numpy())
+                y_conf.append(conf.detach().cpu().numpy())
+                timestamps.append(timestamp.detach().numpy())
+                track_ids.append(track_id.detach().numpy())
+                centroids.append(centroid.detach().cpu().numpy())
+
+                pbar.update()
+
+        test_dict = {'preds': np.concatenate(y_pred), 'conf': np.concatenate(y_conf), 'centroids': np.concatenate(centroids), 'timestamps': np.concatenate(timestamps), 'track_ids': np.concatenate(track_ids)}
+
+        data_loader.dataset.add_output = add_output
+        data_loader.dataset.sample_size = orig_sample_size
+
+        return test_dict
+
+
     def evaluate(self, data_loader, loss_fn, silent=False, df_only=False):
 
         self.set_state('eval')
@@ -3222,36 +3288,37 @@ if __name__ == '__main__':
                                    rasterizer_fn=build_rasterizer_tl)
     
     """
-    chop_indices = [100, 120, 140, 160, 180, 200]#list(range(10, 201, 20))
+    chop_indices = list(range(10, 201, 10))
 
-    run_tests_multi_motion_predict(n_epochs=1000, in_size=128, batch_size=256,
+    run_tests_multi_motion_predict(n_epochs=1200, in_size=224, batch_size=128,
                                    samples_per_epoch=17000 // len(chop_indices),
-                                   sample_history_num_frames=5, history_num_frames=5, history_step_size=1,
+                                   sample_history_num_frames=10, history_num_frames=10, history_step_size=1,
                                    future_num_frames=50,
-                                   group_scenes=False, weight_by_agent_count=7,
+                                   group_scenes=False, weight_by_agent_count=0, lr=1e-4,
                                    clsTrainDataset=MultiMotionPredictDataset,
                                    clsValDataset=MotionPredictDataset,
                                    clsModel=LyftResnest50,
                                    fit_fn='fit_fastai_ralamb', val_fn='test_transform',
                                    loss_fn=neg_log_likelihood_transform,
                                    aug='none',
-                                   loader_fn=double_channel_agents_ego_map_dayhour_tl,
-                                   cfg_fn=create_config_tl,
+                                   loader_fn=double_channel_agents_ego_map_transform,
+                                   cfg_fn=create_config_multi_train_chopped_lite,
                                    str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
-                                   rasterizer_fn=build_rasterizer_tl)
+                                   rasterizer_fn=build_rasterizer)
 
-    run_forecast_multi_motion_predict(n_epochs=1000, in_size=128, batch_size=256,
-                                   samples_per_epoch=17000 // len(chop_indices),
-                                   sample_history_num_frames=5, history_num_frames=5, history_step_size=1,
-                                   future_num_frames=50,
-                                   group_scenes=False, weight_by_agent_count=7,
-                                   clsTrainDataset=MultiMotionPredictDataset,
-                                   clsValDataset=MotionPredictDataset,
-                                   clsModel=LyftResnest50,
-                                   fit_fn='fit_fastai_ralamb', val_fn='test_transform',
-                                   loss_fn=neg_log_likelihood_transform,
-                                   aug='none',
-                                   loader_fn=double_channel_agents_ego_map_dayhour_tl,
-                                   cfg_fn=create_config_tl,
-                                   str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
-                                   rasterizer_fn=build_rasterizer_tl)
+    run_forecast_multi_motion_predict(n_epochs=1200, in_size=224, batch_size=128,
+                                      samples_per_epoch=17000 // len(chop_indices),
+                                      sample_history_num_frames=10, history_num_frames=10, history_step_size=1,
+                                      future_num_frames=50,
+                                      group_scenes=False, weight_by_agent_count=0, lr=1e-4,
+                                      clsTrainDataset=MultiMotionPredictDataset,
+                                      clsValDataset=MotionPredictDataset,
+                                      clsModel=LyftResnest50,
+                                      fit_fn='fit_fastai_ralamb', val_fn='test_transform',
+                                      loss_fn=neg_log_likelihood_transform,
+                                      aug='none',
+                                      loader_fn=double_channel_agents_ego_map_transform,
+                                      cfg_fn=create_config_multi_train_chopped_lite,
+                                      str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
+                                      rasterizer_fn=build_rasterizer)
+
