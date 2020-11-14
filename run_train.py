@@ -1584,7 +1584,7 @@ def double_channel_agents_ego_map_avg_transform(dataset, idx, args_dict, cfg, st
 
     im_ego_history = np.mean(im_ego_history[:, :, history_idx], axis=-1)
 
-    im_reduced = np.stack([im_agents_history, im_agents_current, im_ego_history, im_ego_current, im_map], axis=-1)
+    im_reduced = np.stack([im_agents_history*5, im_agents_current, im_ego_history*5, im_ego_current, im_map], axis=-1)
 
     transforms = make_transform(args_dict['TRANSFORMS']) if 'TRANSFORMS' in args_dict else None
     im_reduced = augment_img(im_reduced, transforms)
@@ -3290,11 +3290,11 @@ if __name__ == '__main__':
     """
     chop_indices = list(range(10, 201, 10))
 
-    run_tests_multi_motion_predict(n_epochs=1200, in_size=224, batch_size=128,
+    run_tests_multi_motion_predict(n_epochs=2000, in_size=128, batch_size=128,
                                    samples_per_epoch=17000 // len(chop_indices),
-                                   sample_history_num_frames=10, history_num_frames=10, history_step_size=1,
+                                   sample_history_num_frames=5, history_num_frames=5, history_step_size=1,
                                    future_num_frames=50,
-                                   group_scenes=False, weight_by_agent_count=0, lr=1e-4,
+                                   group_scenes=False, weight_by_agent_count=7,
                                    clsTrainDataset=MultiMotionPredictDataset,
                                    clsValDataset=MotionPredictDataset,
                                    clsModel=LyftResnest50,
@@ -3306,11 +3306,11 @@ if __name__ == '__main__':
                                    str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
                                    rasterizer_fn=build_rasterizer)
 
-    run_forecast_multi_motion_predict(n_epochs=1200, in_size=224, batch_size=128,
+    run_forecast_multi_motion_predict(n_epochs=2000, in_size=128, batch_size=128,
                                       samples_per_epoch=17000 // len(chop_indices),
-                                      sample_history_num_frames=10, history_num_frames=10, history_step_size=1,
+                                      sample_history_num_frames=5, history_num_frames=5, history_step_size=1,
                                       future_num_frames=50,
-                                      group_scenes=False, weight_by_agent_count=0, lr=1e-4,
+                                      group_scenes=False, weight_by_agent_count=7,
                                       clsTrainDataset=MultiMotionPredictDataset,
                                       clsValDataset=MotionPredictDataset,
                                       clsModel=LyftResnest50,

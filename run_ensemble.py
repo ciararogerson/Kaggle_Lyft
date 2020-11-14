@@ -257,7 +257,12 @@ def generate_ensemble_submission(submission_paths, weights):
 
     ensembled_predictions = combine_predictions(deepcopy(predictions), weights)
 
-    write_pred_csv(os.path.join(SUBMISSIONS_DIR, '_'.join(('submission', datetime.now().strftime('%Y%m%d%H%M%S'), '.csv'))), 
+    # Save weights and submission
+    sub_name = '_'.join(('submission', datetime.now().strftime('%Y%m%d%H%M%S')))
+
+    save_as_pickle(os.path.join(SUBMISSIONS_DIR, '_'.join(('weights', sub_name, '.pkl'))), weights)
+
+    write_pred_csv(os.path.join(SUBMISSIONS_DIR, '_'.join((sub_name, '.csv'))), 
                     subs[0]['timestamps'].values, 
                     subs[0]['track_ids'].values, 
                     ensembled_predictions['preds'], 
