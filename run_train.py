@@ -2260,72 +2260,6 @@ class Network(object):
 
         return test_dict
 
-    def test_flips(self, data_loader, silent=False, df_only=True):
-
-        self.set_state('eval')
-
-        assert hasattr(data_loader.dataset, 'add_output'), 'data_loader must have addtional timestamp/track_id output'
-        add_output = data_loader.dataset.add_output
-        data_loader.dataset.add_output = True
-
-        # Added to ensure when running for val dataset it uses the whole thing
-        orig_sample_size = data_loader.dataset.sample_size
-        if data_loader.dataset.sample_size < len(data_loader.dataset.ds):
-            print(' '.join(('Setting data_loader sample size from', str(orig_sample_size), 'to', str(len(data_loader.dataset.ds)))))
-            data_loader.dataset.sample_size = len(data_loader.dataset.ds)
-
-        y_pred = []
-        y_conf = []
-        timestamps = []
-        track_ids = []
-        centroids = []
-
-        with tqdm(total=len(data_loader), desc="Test transform prediction", leave=False, disable=silent) as pbar:
-
-            for data in data_loader:
-
-                with torch.no_grad():
-
-                    x = data[0]
-                    pseudo_y = data[1]
-                    timestamp = data[2]
-                    track_id = data[3]
-
-                    out = self.predict_net(_x)
-
-                    pred_orig, pred_transform, truth_orig, truth_transform, conf, mask, batch_size, n_modes, future_num_frames, centroid = data_transform_to_modes(out, pseudo_y)
-
-                    pred_orig = pred_orig.reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :, :2] 
-
-                    _x = [x[0].clone().flip(-2)] + x[1:]
-                        
-                    out_flip = self.predict_net(_x)
-
-                    pred_flip, _, _, _, conf_flip, _, _, _, _, _ = data_transform_to_modes(out_flip, pseudo_y)
-
-                    pred_flip = pred_flip.reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :, :2] 
-                    pred_flip[:, :, :, -1] = pred_flip[:, :, :, -1] * -1
-
-                    # Shape predictions correctly and take just the first two (target_x, target_y)
-                    pred = (pred_orig + pred_flip) / 2
-                    conf = (conf + conf_flip) / 2
-
-                y_pred.append(pred.detach().cpu().numpy())
-                y_conf.append(conf.detach().cpu().numpy())
-                timestamps.append(timestamp.detach().numpy())
-                track_ids.append(track_id.detach().numpy())
-                centroids.append(centroid.detach().cpu().numpy())
-
-                pbar.update()
-
-        test_dict = {'preds': np.concatenate(y_pred), 'conf': np.concatenate(y_conf), 'centroids': np.concatenate(centroids), 'timestamps': np.concatenate(timestamps), 'track_ids': np.concatenate(track_ids)}
-
-        data_loader.dataset.add_output = add_output
-        data_loader.dataset.sample_size = orig_sample_size
-
-        return test_dict
-
-
     def evaluate(self, data_loader, loss_fn, silent=False, df_only=False):
 
         self.set_state('eval')
@@ -2444,6 +2378,63 @@ class Network(object):
         learn.unfreeze()
     
         learn_callbacks = [SaveModelCallback(learn, name=f'model', monitor='valid_loss')]
+
+        if resample:
+            class DataSamplingCallback(Callback):
+                def on_epoch_begin(self, **kwargs):
+                    learn.data.train_dl.dl.dataset.sample_ds()
+
+            learn_callbacks = learn_callbacks + [DataSamplingCallback()]
+
+        if hasattr(loss_fn, 'update'):
+            class LossUpdateCallback(Callback):
+                def on_epoch_begin(self, epoch: int, **kwargs):
+                    loss_fn.update(epoch)
+
+            learn_callbacks = learn_callbacks + [LossUpdateCallback()]
+
+        if self.init_model_weights_path is not None:
+            print(' '.join(('Loading weights from', self.init_model_weights_path)))
+            assert os.path.exists(self.init_model_weights_path)
+            learn.model = load_weights(learn.model, self.init_model_weights_path)
+
+        if start_epoch > 0:
+            assert os.path.exists(os.path.join(checkpoint_path, 'models', 'model.pth'))
+            learn.load(os.path.join(checkpoint_path, 'models', 'model'))
+
+        # learn.fit(epochs = epochs, lr=self.lr, callbacks=[SaveModelCallback(learn,name=f'model',monitor='auroc'),
+        #                                        ReduceLROnPlateauCallback(learn,monitor='valid_loss', factor=10, patience=3, min_lr = 1e-10)])
+        learn.fit_one_cycle(epochs, max_lr=self.lr, div_factor=100, pct_start=0.0, callbacks=learn_callbacks)
+        
+        # Load best weights
+        learn.load(os.path.join(checkpoint_path, 'models', 'model'))
+
+        self.net = learn.model.float()
+
+        self.save_state()
+
+        val_model_loss, val_dict = self.evaluate(self.val_loader, loss_fn, silent=True)
+        print('Val loss: ' + str(val_model_loss))
+
+        return val_dict
+
+    def fit_fastai_trainloss(self, epochs, start_epoch=0, resample=True, loss_fn=neg_log_likelihood_transform):
+
+        data = DataBunch(train_dl=self.train_loader, valid_dl=self.val_loader)
+
+        checkpoint_path = os.path.splitext(self.model_checkpoint_path)[0]
+
+        learn = Learner(data,
+                        self.net,
+                        path=checkpoint_path,
+                        loss_func=loss_fn,
+                        opt_func = Over9000,
+                        metrics=[MultiModeNegLogLossTransform()]).to_fp16()
+        learn.clip_grad = 1.0
+        learn.split([self.net.head])
+        learn.unfreeze()
+    
+        learn_callbacks = [SaveModelCallback(learn, name=f'model', monitor='train_loss')]
 
         if resample:
             class DataSamplingCallback(Callback):
@@ -3288,9 +3279,11 @@ if __name__ == '__main__':
                                    rasterizer_fn=build_rasterizer_tl)
     
     """
-    chop_indices = list(range(10, 201, 10))
 
-    run_tests_multi_motion_predict(n_epochs=2000, in_size=128, batch_size=128,
+    # If using weight_by_agent_count = 7 this reduces dataset by approx 13%. With 18 datasets, 1600 epochs implies each image seen twice, approx
+    chop_indices = list(range(10, 121, 10)) + list(range(140, 201, 20))
+
+    run_tests_multi_motion_predict(n_epochs=2000, in_size=196, batch_size=128,
                                    samples_per_epoch=17000 // len(chop_indices),
                                    sample_history_num_frames=5, history_num_frames=5, history_step_size=1,
                                    future_num_frames=50,
@@ -3298,15 +3291,16 @@ if __name__ == '__main__':
                                    clsTrainDataset=MultiMotionPredictDataset,
                                    clsValDataset=MotionPredictDataset,
                                    clsModel=LyftResnest50,
-                                   fit_fn='fit_fastai_ralamb', val_fn='test_transform',
+                                   fit_fn='fit_fastai_trainloss', val_fn='test_transform',
                                    loss_fn=neg_log_likelihood_transform,
                                    aug='none',
+                                   init_model_weights_path = os.path.join(MODEL_DIR, 'chkpt_LyftResnest50_build_rasterizer_double_channel_agents_ego_map_transform_create_config_multi_train_chopped_lite_neg_log_likelihood_transform_128_1000_256_1700_1_5_50_3_False_7_resnet18_fit_fastai_ralamb_none__.pth'),
                                    loader_fn=double_channel_agents_ego_map_transform,
-                                   cfg_fn=create_config_multi_train_chopped_lite,
+                                   cfg_fn=create_config_multi_chopped_lite_val10,
                                    str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
                                    rasterizer_fn=build_rasterizer)
 
-    run_forecast_multi_motion_predict(n_epochs=2000, in_size=128, batch_size=128,
+    run_forecast_multi_motion_predict(n_epochs=2000, in_size=196, batch_size=128,
                                       samples_per_epoch=17000 // len(chop_indices),
                                       sample_history_num_frames=5, history_num_frames=5, history_step_size=1,
                                       future_num_frames=50,
@@ -3314,11 +3308,12 @@ if __name__ == '__main__':
                                       clsTrainDataset=MultiMotionPredictDataset,
                                       clsValDataset=MotionPredictDataset,
                                       clsModel=LyftResnest50,
-                                      fit_fn='fit_fastai_ralamb', val_fn='test_transform',
+                                      fit_fn='fit_fastai_trainloss', val_fn='test_transform',
                                       loss_fn=neg_log_likelihood_transform,
                                       aug='none',
+                                      init_model_weights_path=os.path.join(MODEL_DIR,
+                                                                           'chkpt_LyftResnest50_build_rasterizer_double_channel_agents_ego_map_transform_create_config_multi_train_chopped_lite_neg_log_likelihood_transform_128_1000_256_1700_1_5_50_3_False_7_resnet18_fit_fastai_ralamb_none__.pth'),
                                       loader_fn=double_channel_agents_ego_map_transform,
-                                      cfg_fn=create_config_multi_train_chopped_lite,
+                                      cfg_fn=create_config_multi_chopped_lite_val10,
                                       str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
                                       rasterizer_fn=build_rasterizer)
-

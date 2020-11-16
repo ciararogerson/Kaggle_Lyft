@@ -98,6 +98,7 @@ def calc_weighted_ensemble(preds, confs, alpha_weights):
 
     cw = np.multiply(confs, w)
     cw = np.divide(np.sum(cw, axis=0), np.sum(w, axis=0))
+    cw = np.divide(cw, np.sum(cw, axis=-1)[:, None])
 
     return pw, cw
     
@@ -202,6 +203,8 @@ def estimate_ensemble(sub_paths):
 
     subs = generate_subs(sub_paths)
 
+    assert check_validity(subs)
+
     y = generate_ground_truth(subs[0][['timestamp', 'track_id']].values)
 
     predictions = {'preds': np.stack([np.concatenate([sub[conf_names[j]].values.reshape(-1, 1, 50, 2) for j in range(3)], axis=1) for sub in subs], axis=0),
@@ -252,6 +255,8 @@ def generate_ensemble_submission(submission_paths, weights):
 
     subs = generate_subs(submission_paths)
 
+    assert check_validity(subs)
+
     predictions = {'preds': np.stack([np.concatenate([sub[conf_names[j]].values.reshape(-1, 1, 50, 2) for j in range(3)], axis=1) for sub in subs], axis=0),
                     'confs': np.stack([sub[confs].values for sub in subs], axis=0)}
 
@@ -263,8 +268,8 @@ def generate_ensemble_submission(submission_paths, weights):
     save_as_pickle(os.path.join(SUBMISSIONS_DIR, '_'.join(('weights', sub_name, '.pkl'))), weights)
 
     write_pred_csv(os.path.join(SUBMISSIONS_DIR, '_'.join((sub_name, '.csv'))), 
-                    subs[0]['timestamps'].values, 
-                    subs[0]['track_ids'].values, 
+                    subs[0]['timestamp'].values, 
+                    subs[0]['track_id'].values, 
                     ensembled_predictions['preds'], 
                     ensembled_predictions['confs'])
 
@@ -280,12 +285,14 @@ def generate_ensemble_prediction(submission_paths, weights=None):
 
 if __name__ == '__main__':
 
-    val_paths = [os.path.join(DATA_DIR, 'val_test_transform_LyftResnet18Transform_double_channel_agents_ego_map_dayhour_create_config_train_chopped_neg_log_likelihood_transform_320_0.5_0.5_0.25_0.5_600_256_17000_10_10_50_3_40_resnet18_fit_fastai_transform_heavycoarsedropoutblur__.pkl'),
-                os.path.join(DATA_DIR, 'val_test_transform_LyftResnet18Transform_double_channel_agents_ego_map_transform_create_config_train_chopped_randego_neg_log_likelihood_transform_320_0.5_0.5_0.25_0.5_600_256_17000_5_5_50_3_40_resnet18_fit_fastai_transform_none__.pkl')]
+    val_paths = [os.path.join(DATA_DIR, 'params_v17.chopped.1600_20chops_last_valid100.csv'),
+                os.path.join(DATA_DIR, 'params_v17.chopped.2240_20chops_last_valid100.csv'),
+                os.path.join(DATA_DIR, 'params_v17.chopped.1960_20chops_296_last_valid100.csv')]
     
     weights, nll = estimate_validation_weights(val_paths)
 
-    sub_paths = [os.path.join(SUBMISSIONS_DIR, 'test_test_transform_LyftResnet18Transform_double_channel_agents_ego_map_dayhour_create_config_train_chopped_neg_log_likelihood_transform_320_0.5_0.5_0.25_0.5_600_256_17000_10_10_50_3_40_resnet18_fit_fastai_transform_heavycoarsedropoutblur__.csv'),
-                os.path.join(SUBMISSIONS_DIR, 'test_test_transform_LyftResnet18Transform_double_channel_agents_ego_map_transform_create_config_train_chopped_randego_neg_log_likelihood_transform_320_0.5_0.5_0.25_0.5_600_256_17000_5_5_50_3_40_resnet18_fit_fastai_transform_none__.csv')]
+    sub_paths = [os.path.join(SUBMISSIONS_DIR, 'submission_rp_1261.csv'),
+                os.path.join(SUBMISSIONS_DIR, 'submission_rp_1230.csv'),
+                os.path.join(SUBMISSIONS_DIR, 'submission_rp_12496.csv')]
 
     generate_ensemble_submission(sub_paths, weights)
