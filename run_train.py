@@ -2260,6 +2260,82 @@ class Network(object):
 
         return test_dict
 
+    def test_tta_10(self, data_loader, silent=False, df_only=True, n_tta=10):
+
+        self.set_state('eval')
+
+        assert hasattr(data_loader.dataset, 'add_output'), 'data_loader must have addtional timestamp/track_id output'
+        add_output = data_loader.dataset.add_output
+        data_loader.dataset.add_output = True
+
+        # Added to ensure when running for val dataset it uses the whole thing
+        orig_sample_size = data_loader.dataset.sample_size
+        if data_loader.dataset.sample_size < len(data_loader.dataset.ds):
+            print(' '.join(('Setting data_loader sample size from', str(orig_sample_size), 'to', str(len(data_loader.dataset.ds)))))
+            data_loader.dataset.sample_size = len(data_loader.dataset.ds)
+
+
+        transforms = albumentations.Compose([OneOf([MotionBlur(p=0.5), 
+                                                    MedianBlur(p=0.5, blur_limit=3), 
+                                                    Blur(p=0.5, blur_limit=3)]), 
+                                            OneOf([CoarseDropout(max_holes=6, min_holes=1, max_height=8, max_width=8, p=0.5),
+                                                    CoarseDropout(max_holes=12, min_holes=1, max_height=4, max_width=4, p=0.5)])])
+
+        y_pred = []
+        y_conf = []
+        timestamps = []
+        track_ids = []
+        centroids = []
+
+        with tqdm(total=len(data_loader), desc="Test transform prediction", leave=False, disable=silent) as pbar:
+
+            for data in data_loader:
+
+                with torch.no_grad():
+
+                    x = data[0]
+                    pseudo_y = data[1]
+                    timestamp = data[2]
+                    track_id = data[3]
+
+                    out = self.predict_net(x)
+
+                    pred_orig, pred_transform, truth_orig, truth_transform, conf, mask, batch_size, n_modes, future_num_frames, centroid = data_transform_to_modes(out, pseudo_y)
+
+                    # Shape predictions correctly and take just the first two (target_x, target_y)
+                    pred = pred_orig.reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :50, :2]
+
+                    for tta in range(n_tta):
+
+                        _x = [transforms(x[0].clone())] + x[1:]
+
+                        out_tta = self.predict_net(_x)
+
+                        pred_tta, _, _, _, conf_tta, _, _, _, _, _ = data_transform_to_modes(out_tta, pseudo_y)
+
+                        pred_tta = pred_tta.reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :50, :2] 
+
+                        pred += pred_tta
+                        conf += conf_tta
+
+                    pred = pred / (n_tta + 1)
+                    conf = conf / (n_tta + 1)
+
+                y_pred.append(pred.detach().cpu().numpy())
+                y_conf.append(conf.detach().cpu().numpy())
+                timestamps.append(timestamp.numpy())
+                track_ids.append(track_id.numpy())
+                centroids.append(centroid.detach().cpu().numpy())
+
+                pbar.update()
+
+        test_dict = {'preds': np.concatenate(y_pred), 'conf': np.concatenate(y_conf), 'centroids': np.concatenate(centroids), 'timestamps': np.concatenate(timestamps), 'track_ids': np.concatenate(track_ids)}
+
+        data_loader.dataset.add_output = add_output
+        data_loader.dataset.sample_size = orig_sample_size
+
+        return test_dict
+
     def evaluate(self, data_loader, loss_fn, silent=False, df_only=False):
 
         self.set_state('eval')
@@ -3283,7 +3359,7 @@ if __name__ == '__main__':
     # If using weight_by_agent_count = 7 this reduces dataset by approx 13%. With 18 datasets, 1600 epochs implies each image seen twice, approx
     chop_indices = list(range(10, 121, 10)) + list(range(140, 201, 20))
 
-    run_tests_multi_motion_predict(n_epochs=2000, in_size=196, batch_size=128,
+    run_tests_multi_motion_predict(n_epochs=2800, in_size=128, batch_size=256,
                                    samples_per_epoch=17000 // len(chop_indices),
                                    sample_history_num_frames=5, history_num_frames=5, history_step_size=1,
                                    future_num_frames=50,
@@ -3294,13 +3370,13 @@ if __name__ == '__main__':
                                    fit_fn='fit_fastai_trainloss', val_fn='test_transform',
                                    loss_fn=neg_log_likelihood_transform,
                                    aug='none',
-                                   init_model_weights_path = os.path.join(MODEL_DIR, 'chkpt_LyftResnest50_build_rasterizer_double_channel_agents_ego_map_transform_create_config_multi_train_chopped_lite_neg_log_likelihood_transform_128_1000_256_1700_1_5_50_3_False_7_resnet18_fit_fastai_ralamb_none__.pth'),
+                                   # init_model_weights_path = os.path.join(MODEL_DIR, 'chkpt_LyftResnest50_build_rasterizer_double_channel_agents_ego_map_transform_create_config_multi_train_chopped_lite_neg_log_likelihood_transform_128_1000_256_1700_1_5_50_3_False_7_resnet18_fit_fastai_ralamb_none__.pth'),
                                    loader_fn=double_channel_agents_ego_map_transform,
                                    cfg_fn=create_config_multi_chopped_lite_val10,
                                    str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
                                    rasterizer_fn=build_rasterizer)
 
-    run_forecast_multi_motion_predict(n_epochs=2000, in_size=196, batch_size=128,
+    run_forecast_multi_motion_predict(n_epochs=2800, in_size=128, batch_size=256,
                                       samples_per_epoch=17000 // len(chop_indices),
                                       sample_history_num_frames=5, history_num_frames=5, history_step_size=1,
                                       future_num_frames=50,
@@ -3311,9 +3387,9 @@ if __name__ == '__main__':
                                       fit_fn='fit_fastai_trainloss', val_fn='test_transform',
                                       loss_fn=neg_log_likelihood_transform,
                                       aug='none',
-                                      init_model_weights_path=os.path.join(MODEL_DIR,
-                                                                           'chkpt_LyftResnest50_build_rasterizer_double_channel_agents_ego_map_transform_create_config_multi_train_chopped_lite_neg_log_likelihood_transform_128_1000_256_1700_1_5_50_3_False_7_resnet18_fit_fastai_ralamb_none__.pth'),
+                                      # init_model_weights_path=os.path.join(MODEL_DIR,'chkpt_LyftResnest50_build_rasterizer_double_channel_agents_ego_map_transform_create_config_multi_train_chopped_lite_neg_log_likelihood_transform_128_1000_256_1700_1_5_50_3_False_7_resnet18_fit_fastai_ralamb_none__.pth'),
                                       loader_fn=double_channel_agents_ego_map_transform,
                                       cfg_fn=create_config_multi_chopped_lite_val10,
                                       str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
                                       rasterizer_fn=build_rasterizer)
+

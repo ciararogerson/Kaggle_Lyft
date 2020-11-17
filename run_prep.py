@@ -43,7 +43,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from utils import *
 from settings import BASE_DIR, DATA_DIR, CACHE_DIR, MODEL_DIR
-from configs import create_prep_config
+from configs import create_prep_config, create_prep_config_future100
 
 
 
@@ -86,7 +86,7 @@ def create_chopped_dataset_lite(
         str: the parent folder of the new datam
     """
     zarr_path = Path(zarr_path)
-    dest_path = zarr_path.parent / f"{zarr_path.stem}_chopped_{num_frames_to_copy}_lite_{history_num_frames}"
+    dest_path = zarr_path.parent / f"{zarr_path.stem}_chopped_{num_frames_to_copy}_lite_{history_num_frames}_{num_frames_gt}"
     chopped_path = dest_path / zarr_path.name
     gt_path = dest_path / "gt.csv"
     mask_chopped_path = dest_path / "mask"
@@ -307,9 +307,9 @@ if __name__ == '__main__':
     """
 
 
-    chop_indices = [120, 140, 160, 180, 200]
+    chop_indices = [100]
 
     for str_loader in ['train_data_loader']:
         for n in chop_indices:
             print(' : '.join((str_loader, str(n))))
-            save_multi_datasets(str_data_loader=str_loader, num_frames_to_chop=[n] if not isinstance(n, list) else n, history_num_frames=100)
+            save_multi_datasets(config=create_prep_config_future100(), str_data_loader=str_loader, num_frames_to_chop=[n] if not isinstance(n, list) else n, history_num_frames=100)
