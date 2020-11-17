@@ -171,7 +171,7 @@ def sort_sub_by_distances(sub):
     return sub
 
 
-def generate_ground_truth(timestamps_trackid, gt_path=os.path.join(BASE_DIR, 'scenes/validate_chopped_100','gt.csv')):
+def generate_ground_truth(timestamps_trackid, gt_path):
 
     gt = {}
     for row in tqdm(read_gt_csv(gt_path)):
@@ -199,13 +199,13 @@ def generate_subs(sub_paths):
     return subs
 
 
-def estimate_ensemble(sub_paths):
+def estimate_ensemble(sub_paths, gt_path):
 
     subs = generate_subs(sub_paths)
 
     assert check_validity(subs)
 
-    y = generate_ground_truth(subs[0][['timestamp', 'track_id']].values)
+    y = generate_ground_truth(subs[0][['timestamp', 'track_id']].values, gt_path)
 
     predictions = {'preds': np.stack([np.concatenate([sub[conf_names[j]].values.reshape(-1, 1, 50, 2) for j in range(3)], axis=1) for sub in subs], axis=0),
                     'confs': np.stack([sub[confs].values for sub in subs], axis=0)}
@@ -244,11 +244,11 @@ def generate_subs_from_val(val_path):
     return val_sub_path
 
 
-def estimate_validation_weights(val_paths):
+def estimate_validation_weights(val_paths, gt_path=os.path.join(BASE_DIR, 'scenes/validate_chopped_100','gt.csv')):
 
     val_sub_paths = [generate_subs_from_val(val_path) for val_path in val_paths]
 
-    return estimate_ensemble(val_sub_paths)
+    return estimate_ensemble(val_sub_paths, gt_path)
 
 
 def generate_ensemble_submission(submission_paths, weights):
@@ -285,14 +285,32 @@ def generate_ensemble_prediction(submission_paths, weights=None):
 
 if __name__ == '__main__':
 
-    val_paths = [os.path.join(DATA_DIR, 'params_v17.chopped.1600_20chops_last_valid100.csv'),
-                os.path.join(DATA_DIR, 'params_v17.chopped.2240_20chops_last_valid100.csv'),
-                os.path.join(DATA_DIR, 'params_v17.chopped.1960_20chops_296_last_valid100.csv')]
+    gt_path = os.path.join(BASE_DIR, 'scenes/validate_chopped_150_lite_100_50', 'gt.csv')
     
-    weights, nll = estimate_validation_weights(val_paths)
+    val_paths = [os.path.join(DATA_DIR, 'params_v17.chopped.1600_20chops_last_valid150.csv'),
+                 os.path.join(DATA_DIR, 'params_v17.chopped.2240_20chops_last_valid150.csv'),
+                 os.path.join(DATA_DIR, 'params_v17.chopped.1960_20chops_296_last_valid150.csv')]
+
+    weights, nll = estimate_validation_weights(val_paths, gt_path)
+
+    sub_paths = [os.path.join(SUBMISSIONS_DIR, 'submission_rp_1261.csv'),
+                 os.path.join(SUBMISSIONS_DIR, 'submission_rp_1230.csv'),
+                 os.path.join(SUBMISSIONS_DIR, 'submission_rp_12496.csv')]
+
+    generate_ensemble_submission(sub_paths, weights)
+
+    gt_path = os.path.join(BASE_DIR, 'scenes/validate_chopped_50_lite_100_50','gt.csv')
+
+    val_paths = [os.path.join(DATA_DIR, 'params_v17.chopped.1600_20chops_last_valid50.csv'),
+                os.path.join(DATA_DIR, 'params_v17.chopped.2240_20chops_last_valid50.csv'),
+                os.path.join(DATA_DIR, 'params_v17.chopped.1960_20chops_296_last_valid50.csv')]
+    
+    weights, nll = estimate_validation_weights(val_paths, gt_path)
 
     sub_paths = [os.path.join(SUBMISSIONS_DIR, 'submission_rp_1261.csv'),
                 os.path.join(SUBMISSIONS_DIR, 'submission_rp_1230.csv'),
                 os.path.join(SUBMISSIONS_DIR, 'submission_rp_12496.csv')]
 
     generate_ensemble_submission(sub_paths, weights)
+
+

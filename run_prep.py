@@ -274,7 +274,7 @@ def create_tl_dataset(zarr_path: str, dataset_path: str) -> None:
 # DATA PREP
 ######################################
 
-def save_chopped_ds_lite(cfg, str_data_loader='train_data_loader', num_frames_to_chop=100, history_num_frames=10, min_future_steps=10):
+def save_chopped_ds_lite(cfg, str_data_loader='train_data_loader', num_frames_to_chop=10, history_num_frames=10, min_future_steps=10):
 
     dm = LocalDataManager(None)
     chopped_ds_path = create_chopped_dataset_lite(dm.require(cfg[str_data_loader]["key"]), cfg["raster_params"]["filter_agents_threshold"], 
@@ -309,7 +309,7 @@ if __name__ == '__main__':
 
     chop_indices = [100]
 
-    for str_loader in ['train_data_loader']:
+    for str_loader in ['val_data_loader']:
         for n in chop_indices:
             print(' : '.join((str_loader, str(n))))
             save_multi_datasets(config=create_prep_config_future100(), str_data_loader=str_loader, num_frames_to_chop=[n] if not isinstance(n, list) else n, history_num_frames=100)

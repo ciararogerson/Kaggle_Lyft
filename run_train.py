@@ -3313,83 +3313,38 @@ def test_agent_dataset(str_loader):
 
 
 if __name__ == '__main__':
-    """
-    chop_indices = [100, 120, 140, 160, 180, 200]
-
-    try:
-        run_tests_multi_motion_predict(n_epochs=1000, in_size=224, batch_size=256,
-                                       samples_per_epoch=17000//len(chop_indices),
-                                       sample_history_num_frames=10, history_num_frames=10, history_step_size=1,
-                                       future_num_frames=50,
-                                       group_scenes=False, weight_by_agent_count=0,
-                                       clsTrainDataset=MultiMotionPredictDataset,
-                                       clsValDataset=MotionPredictDataset,
-                                       clsModel=LyftResnet18Transform,
-                                       fit_fn='fit_fastai_transform', val_fn='test_transform',
-                                       loss_fn=neg_log_likelihood_transform,
-                                       aug='none',
-                                       init_model_weights_path=os.path.join(MODEL_DIR, 'chkpt_LyftResnet18Transform_build_rasterizer_tl_double_channel_agents_ego_map_tl_create_config_tl_neg_log_likelihood_transform_128_600_256_17000_1_5_50_3_False_0_resnet18_fit_fastai_transform_none__.pth'),
-                                       loader_fn=double_channel_agents_ego_map_tl,
-                                       cfg_fn=create_config_tl,
-                                       str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
-                                       rasterizer_fn=build_rasterizer_tl)
-    except:
-        print('error saving val')
-
-    run_forecast_multi_motion_predict(n_epochs=1000, in_size=224, batch_size=256,
-                                   samples_per_epoch=17000 // len(chop_indices),
-                                   sample_history_num_frames=10, history_num_frames=10, history_step_size=1,
-                                   future_num_frames=50,
-                                   group_scenes=False, weight_by_agent_count=0,
-                                   clsTrainDataset=MultiMotionPredictDataset,
-                                   clsValDataset=MotionPredictDataset,
-                                   clsModel=LyftResnet18Transform,
-                                   fit_fn='fit_fastai_transform', val_fn='test_transform',
-                                   loss_fn=neg_log_likelihood_transform,
-                                   aug='none',
-                                   init_model_weights_path=os.path.join(MODEL_DIR,
-                                                                        'chkpt_LyftResnet18Transform_build_rasterizer_tl_double_channel_agents_ego_map_tl_create_config_tl_neg_log_likelihood_transform_128_600_256_17000_1_5_50_3_False_0_resnet18_fit_fastai_transform_none__.pth'),
-                                   loader_fn=double_channel_agents_ego_map_tl,
-                                   cfg_fn=create_config_tl,
-                                   str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
-                                   rasterizer_fn=build_rasterizer_tl)
-    
-    """
 
     # If using weight_by_agent_count = 7 this reduces dataset by approx 13%. With 18 datasets, 1600 epochs implies each image seen twice, approx
-    chop_indices = list(range(10, 121, 10)) + list(range(140, 201, 20))
+    chop_indices = [100]
 
-    run_tests_multi_motion_predict(n_epochs=2800, in_size=128, batch_size=256,
-                                   samples_per_epoch=17000 // len(chop_indices),
+    run_tests_multi_motion_predict(n_epochs=1000, in_size=128, batch_size=256,
+                                   samples_per_epoch=17000 // 10,
                                    sample_history_num_frames=5, history_num_frames=5, history_step_size=1,
                                    future_num_frames=50,
                                    group_scenes=False, weight_by_agent_count=7,
                                    clsTrainDataset=MultiMotionPredictDataset,
                                    clsValDataset=MotionPredictDataset,
                                    clsModel=LyftResnest50,
-                                   fit_fn='fit_fastai_trainloss', val_fn='test_transform',
+                                   fit_fn='fit_fastai_ralamb', val_fn='test_tta_10',
                                    loss_fn=neg_log_likelihood_transform,
                                    aug='none',
-                                   # init_model_weights_path = os.path.join(MODEL_DIR, 'chkpt_LyftResnest50_build_rasterizer_double_channel_agents_ego_map_transform_create_config_multi_train_chopped_lite_neg_log_likelihood_transform_128_1000_256_1700_1_5_50_3_False_7_resnet18_fit_fastai_ralamb_none__.pth'),
                                    loader_fn=double_channel_agents_ego_map_transform,
-                                   cfg_fn=create_config_multi_chopped_lite_val10,
+                                   cfg_fn=create_config_multi_train_chopped_lite,
                                    str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
                                    rasterizer_fn=build_rasterizer)
 
-    run_forecast_multi_motion_predict(n_epochs=2800, in_size=128, batch_size=256,
-                                      samples_per_epoch=17000 // len(chop_indices),
+    run_forecast_multi_motion_predict(n_epochs=1000, in_size=128, batch_size=256,
+                                      samples_per_epoch=17000 // 10,
                                       sample_history_num_frames=5, history_num_frames=5, history_step_size=1,
                                       future_num_frames=50,
                                       group_scenes=False, weight_by_agent_count=7,
                                       clsTrainDataset=MultiMotionPredictDataset,
                                       clsValDataset=MotionPredictDataset,
                                       clsModel=LyftResnest50,
-                                      fit_fn='fit_fastai_trainloss', val_fn='test_transform',
+                                      fit_fn='fit_fastai_ralamb', val_fn='test_tta_10',
                                       loss_fn=neg_log_likelihood_transform,
                                       aug='none',
-                                      # init_model_weights_path=os.path.join(MODEL_DIR,'chkpt_LyftResnest50_build_rasterizer_double_channel_agents_ego_map_transform_create_config_multi_train_chopped_lite_neg_log_likelihood_transform_128_1000_256_1700_1_5_50_3_False_7_resnet18_fit_fastai_ralamb_none__.pth'),
                                       loader_fn=double_channel_agents_ego_map_transform,
-                                      cfg_fn=create_config_multi_chopped_lite_val10,
+                                      cfg_fn=create_config_multi_train_chopped_lite,
                                       str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
                                       rasterizer_fn=build_rasterizer)
-
