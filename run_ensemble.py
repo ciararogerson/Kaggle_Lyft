@@ -329,15 +329,17 @@ if __name__ == '__main__':
     val_paths = [os.path.join(DATA_DIR,'val_test_transform_LyftResnest50_double_channel_agents_ego_map_transform_create_config_multi_chopped_lite_val10_neg_log_likelihood_transform_128_2800_256_1062_1_5_50_3_False_7_resnet18_fit_fastai_trainloss_none__.pkl'),
                  os.path.join(DATA_DIR, 'params_v17.chopped.1600_20chops_last_valid100.csv'),
                  os.path.join(DATA_DIR, 'params_v17.chopped.2240_20chops_last_valid100.csv'),
-                 os.path.join(DATA_DIR, 'params_v17.chopped.1960_20chops_296_last_valid100.csv')]
+                 os.path.join(DATA_DIR, 'params_v17.chopped.1960_20chops_296_last_valid100.csv'),
+                 os.path.join(DATA_DIR, 'params_v17.chopped.4000_20chops_last_valid100.csv')]
 
     
-    weights, nll = estimate_validation_weights(val_paths, gt_path, opt_fn=conf_weighted_nll)
+    weights, nll = estimate_validation_weights(val_paths, gt_path, opt_fn=dist_weighted_nll)
 
     sub_paths = [os.path.join(SUBMISSIONS_DIR,'test_test_transform_LyftResnest50_double_channel_agents_ego_map_transform_create_config_multi_chopped_lite_val10_neg_log_likelihood_transform_128_2800_256_1062_1_5_50_3_False_7_resnet18_fit_fastai_trainloss_none__.csv'),
                  os.path.join(SUBMISSIONS_DIR, 'submission_rp_1261.csv'),
                  os.path.join(SUBMISSIONS_DIR, 'submission_rp_1230.csv'),
-                 os.path.join(SUBMISSIONS_DIR, 'submission_rp_12496.csv')]
+                 os.path.join(SUBMISSIONS_DIR, 'submission_rp_12496.csv'),
+                 os.path.join(SUBMISSIONS_DIR, 'submission_rp_1159.csv')]
 
     generate_ensemble_submission(sub_paths, weights)
 

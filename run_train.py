@@ -2273,7 +2273,6 @@ class Network(object):
                  step_lr=False,
                  init_model_weights_path=None,
                  model_checkpoint_path=os.path.join(MODEL_DIR, 'model-checkpoint.pth'),
-                 optimizer_checkpoint_path=os.path.join(MODEL_DIR, 'opt-checkpoint.pth'),
                  save_net=False):
 
         super(Network, self).__init__()
@@ -2302,7 +2301,7 @@ class Network(object):
 
         self.init_model_weights_path = init_model_weights_path
         self.model_checkpoint_path = model_checkpoint_path
-        self.optimizer_checkpoint_path = optimizer_checkpoint_path
+        self.optimizer_checkpoint_path = os.path.splitext(model_checkpoint_path)[0] + '_optimizer.pth'
 
         self.confusion_matrix = None
         self.n_classes = 0
@@ -2813,7 +2812,7 @@ class Network(object):
 
     def save_state(self):
         torch.save(self.net.state_dict(), self.model_checkpoint_path)
-        # torch.save(self.optimizer.state_dict(), self.optimizer_checkpoint_path)
+        torch.save(self.optimizer.state_dict(), self.optimizer_checkpoint_path)
 
 
 class LyftResnet18Small(nn.Module):
