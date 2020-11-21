@@ -307,9 +307,9 @@ if __name__ == '__main__':
     """
 
 
-    chop_indices = [100]
+    chop_indices = list(range(15, 200, 10))
 
-    for str_loader in ['val_data_loader']:
+    for str_loader in ['train_data_loader']:
         for n in chop_indices:
             print(' : '.join((str_loader, str(n))))
-            save_multi_datasets(config=create_prep_config_future100(), str_data_loader=str_loader, num_frames_to_chop=[n] if not isinstance(n, list) else n, history_num_frames=100)
+            save_multi_datasets(config=create_prep_config(), str_data_loader=str_loader, num_frames_to_chop=[n] if not isinstance(n, list) else n, history_num_frames=100)

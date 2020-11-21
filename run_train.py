@@ -35,6 +35,7 @@ from efficientnet_pytorch import EfficientNet
 import fastai
 from fastai.vision import *
 from fastai.callbacks import SaveModelCallback, ReduceLROnPlateauCallback
+from fastai.callback import *
 from fastai.torch_core import add_metrics
 
 from l5kit.data import DataManager, LocalDataManager, ChunkedDataset, TL_FACE_DTYPE, filter_agents_by_labels, filter_tl_faces_by_frames, get_agents_slice_from_frames, get_tl_faces_slice_from_frames
@@ -1428,6 +1429,88 @@ class MultiMotionPredictDataset(Dataset):
         return self.sample_size
 
 
+class ListMotionPredictDataset(Dataset):
+    """
+    Holder for multiple MotionPredictDatasets
+    """
+
+    def __init__(self,
+                 cfg,
+                 args_dict={},
+                 str_loader=['train_data_loader'],
+                 fn_rasterizer=build_rasterizer,
+                 fn_create=None,
+                 list_len=1):
+
+        self.cfg = cfg
+        self.args_dict = args_dict
+        self.str_loader = str_loader
+        self.fn_rasterizer = fn_rasterizer
+        self.fn_create = fn_create  # Function that takes a filename input and creates a model input
+    
+        random.shuffle(self.str_loader)
+        self.list_len = list_len
+
+        self.list_start_idx = 0
+        self.counter = 0
+
+        self.setup()
+
+
+    def setup(self):
+
+        assert isinstance(self.str_loader, (list, tuple)), 'str_loader must be a list/tuple for use in MultiMotionPredictDataset '
+
+        self.counter = 0
+
+        self.dataset_list = [MotionPredictDataset(self.cfg, self.args_dict, str_loader, self.fn_rasterizer, self.fn_create) for str_loader in self.str_loader[self.list_start_idx : self.list_start_idx + self.list_len]]
+
+        self.full_dataset_sizes = [len(dataset.ds) for dataset in self.dataset_list]
+        self.dataset_sizes = [len(dataset) for dataset in self.dataset_list]
+
+        self.sample_size = int(np.sum(self.dataset_sizes))
+
+        self.cumulative_dataset_sizes = np.cumsum(self.dataset_sizes)
+
+        self.shuffle = True if all(['train_data_loader' in s for s in self.str_loader]) else False
+
+        self.all_idx = list(range(self.sample_size))
+        if self.shuffle: random.shuffle(self.all_idx)
+
+
+    def sample_ds(self):
+
+        if DEBUG: print('Sampling all sub datasets...')
+
+        for ds in self.dataset_list: 
+            ds.sample_ds()
+
+
+    def __getitem__(self, index):
+        
+        self.counter += 1
+
+        if self.counter >= np.min(full_dataset_sizes):
+            self.setup()
+            
+        dataset_loc = np.argmax(np.less(index, self.cumulative_dataset_sizes))
+        idx = index if dataset_loc==0 else index - self.cumulative_dataset_sizes[dataset_loc - 1]
+        
+        try:
+            out = self.dataset_list[dataset_loc][idx]
+        except:
+            print('********************************')
+            print(self.str_loader[dataset_loc])
+            print(idx)
+            print('********************************')
+
+        return out
+
+
+    def __len__(self):
+        return self.sample_size
+
+
 def return_idx(dataset, idx):
     return dataset[idx]
 
@@ -1926,6 +2009,21 @@ def numpy_to_torch(img):
     return img
 
 
+def batch_numpy_to_torch(img):
+    img = img.astype(np.float32)
+    img = np.moveaxis(img, -1, 1)
+    img = torch.tensor(img)
+    with torch.no_grad():
+        img = img / 255
+    return img
+
+
+def batch_torch_to_numpy(img):
+    img = img * 255
+    img = img.cpu().numpy()
+    img = np.moveaxis(img, 1, -1)
+    return img
+
 ##############################################
 # DATA LOADERS
 ##############################################
@@ -2108,6 +2206,11 @@ def neg_log_likelihood_transform_orig(pred, truth, reduction='mean'):
     return neg_log_likelihood_transform(pred, truth, calctype='orig', reduction=reduction)
 
 
+def neg_log_likelihood_transform_100(pred, truth, reduction='mean'):
+    # For assessing original coordinate system under transform data format
+    return neg_log_likelihood_transform(pred, truth, calctype='orig', reduction=reduction) / 100
+
+
 def neg_log_likelihood_weighted(pred, truth, calctype='transform', reduction='mean'):
     """
     pred = n_modes (confidence for each mode) + (future_num_frames * 3 (x, y, yaw) * 2)
@@ -2243,13 +2346,13 @@ class Network(object):
                     pred_orig, pred_transform, truth_orig, truth_transform, conf, mask, batch_size, n_modes, future_num_frames, centroid = data_transform_to_modes(out, pseudo_y)
 
                     # Shape predictions correctly and take just the first two (target_x, target_y)
-                    pred = pred_orig.reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :, :2]
+                    pred = pred_orig.reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :50, :2]
 
-                y_pred.append(pred.cpu().numpy())
-                y_conf.append(conf.cpu().numpy())
+                y_pred.append(pred.detach().cpu().numpy())
+                y_conf.append(conf.detach().cpu().numpy())
                 timestamps.append(timestamp.numpy())
                 track_ids.append(track_id.numpy())
-                centroids.append(centroid.cpu().numpy())
+                centroids.append(centroid.detach().cpu().numpy())
 
                 pbar.update()
 
@@ -2276,7 +2379,6 @@ class Network(object):
 
 
         transforms = albumentations.Compose([OneOf([MotionBlur(p=0.5), 
-                                                    MedianBlur(p=0.5, blur_limit=3), 
                                                     Blur(p=0.5, blur_limit=3)]), 
                                             OneOf([CoarseDropout(max_holes=6, min_holes=1, max_height=8, max_width=8, p=0.5),
                                                     CoarseDropout(max_holes=12, min_holes=1, max_height=4, max_width=4, p=0.5)])])
@@ -2287,47 +2389,196 @@ class Network(object):
         track_ids = []
         centroids = []
 
-        with tqdm(total=len(data_loader), desc="Test transform prediction", leave=False, disable=silent) as pbar:
+        for data in tqdm(data_loader, total=len(data_loader), desc="Test tta prediction"):
 
-            for data in data_loader:
+            with torch.no_grad():
 
-                with torch.no_grad():
+                x = data[0]
+                pseudo_y = data[1]
+                timestamp = data[2]
+                track_id = data[3]
 
-                    x = data[0]
-                    pseudo_y = data[1]
-                    timestamp = data[2]
-                    track_id = data[3]
+                out = self.predict_net(x)
 
-                    out = self.predict_net(x)
+                pred_orig, pred_transform, truth_orig, truth_transform, conf, mask, batch_size, n_modes, future_num_frames, centroid = data_transform_to_modes(out, pseudo_y)
 
-                    pred_orig, pred_transform, truth_orig, truth_transform, conf, mask, batch_size, n_modes, future_num_frames, centroid = data_transform_to_modes(out, pseudo_y)
+                # Shape predictions correctly and take just the first two (target_x, target_y)
+                pred = pred_orig.reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :50, :2]
 
-                    # Shape predictions correctly and take just the first two (target_x, target_y)
-                    pred = pred_orig.reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :50, :2]
+                for tta in range(n_tta):
+                    
+                    imgs = batch_torch_to_numpy(x[0].clone())
 
-                    for tta in range(n_tta):
+                    aug_img = np.stack([transforms(image=imgs[i])['image'] for i in range(imgs.shape[0])], axis=0)
+                    
+                    _x = [batch_numpy_to_torch(aug_img).to(DEVICE)] + x[1:]
 
-                        _x = [transforms(x[0].clone())] + x[1:]
+                    out_tta = self.predict_net(_x)
 
-                        out_tta = self.predict_net(_x)
+                    pred_tta, _, _, _, conf_tta, _, _, _, _, _ = data_transform_to_modes(out_tta, pseudo_y)
 
-                        pred_tta, _, _, _, conf_tta, _, _, _, _, _ = data_transform_to_modes(out_tta, pseudo_y)
+                    pred_tta = pred_tta.reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :50, :2] 
 
-                        pred_tta = pred_tta.reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :50, :2] 
+                    pred = pred + pred_tta
+                    conf = conf + conf_tta
 
-                        pred += pred_tta
-                        conf += conf_tta
+                pred = pred / (n_tta + 1)
+                conf = conf / (n_tta + 1)
 
-                    pred = pred / (n_tta + 1)
-                    conf = conf / (n_tta + 1)
+            y_pred.append(pred.detach().cpu().numpy())
+            y_conf.append(conf.detach().cpu().numpy())
+            timestamps.append(timestamp.numpy())
+            track_ids.append(track_id.numpy())
+            centroids.append(centroid.detach().cpu().numpy())
 
-                y_pred.append(pred.detach().cpu().numpy())
-                y_conf.append(conf.detach().cpu().numpy())
-                timestamps.append(timestamp.numpy())
-                track_ids.append(track_id.numpy())
-                centroids.append(centroid.detach().cpu().numpy())
 
-                pbar.update()
+        test_dict = {'preds': np.concatenate(y_pred), 'conf': np.concatenate(y_conf), 'centroids': np.concatenate(centroids), 'timestamps': np.concatenate(timestamps), 'track_ids': np.concatenate(track_ids)}
+
+        data_loader.dataset.add_output = add_output
+        data_loader.dataset.sample_size = orig_sample_size
+
+        return test_dict
+
+    def test_tta_8(self, data_loader, silent=False, df_only=True, n_tta=8):
+
+        self.set_state('eval')
+
+        assert hasattr(data_loader.dataset, 'add_output'), 'data_loader must have addtional timestamp/track_id output'
+        add_output = data_loader.dataset.add_output
+        data_loader.dataset.add_output = True
+
+        # Added to ensure when running for val dataset it uses the whole thing
+        orig_sample_size = data_loader.dataset.sample_size
+        if data_loader.dataset.sample_size < len(data_loader.dataset.ds):
+            print(' '.join(('Setting data_loader sample size from', str(orig_sample_size), 'to', str(len(data_loader.dataset.ds)))))
+            data_loader.dataset.sample_size = len(data_loader.dataset.ds)
+
+
+        transforms = albumentations.Compose([OneOf([CoarseDropout(max_holes=3, min_holes=1, max_height=8, max_width=8, p=0.5),
+                                                    CoarseDropout(max_holes=6, min_holes=1, max_height=4, max_width=4, p=0.5)])])
+
+        y_pred = []
+        y_conf = []
+        timestamps = []
+        track_ids = []
+        centroids = []
+
+        for data in tqdm(data_loader, total=len(data_loader), desc="Test tta prediction"):
+
+            with torch.no_grad():
+
+                x = data[0]
+                pseudo_y = data[1]
+                timestamp = data[2]
+                track_id = data[3]
+
+                out = self.predict_net(x)
+
+                pred_orig, pred_transform, truth_orig, truth_transform, conf, mask, batch_size, n_modes, future_num_frames, centroid = data_transform_to_modes(out, pseudo_y)
+
+                # Shape predictions correctly and take just the first two (target_x, target_y)
+                pred = pred_orig.reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :50, :2]
+
+                for tta in range(n_tta):
+                    
+                    imgs = batch_torch_to_numpy(x[0].clone())
+
+                    aug_img = np.stack([transforms(image=imgs[i])['image'] for i in range(imgs.shape[0])], axis=0)
+                    
+                    _x = [batch_numpy_to_torch(aug_img).to(DEVICE)] + x[1:]
+
+                    out_tta = self.predict_net(_x)
+
+                    pred_tta, _, _, _, conf_tta, _, _, _, _, _ = data_transform_to_modes(out_tta, pseudo_y)
+
+                    pred_tta = pred_tta.reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :50, :2] 
+
+                    pred = pred + pred_tta
+                    conf = conf + conf_tta
+
+                pred = pred / (n_tta + 1)
+                conf = conf / (n_tta + 1)
+
+            y_pred.append(pred.detach().cpu().numpy())
+            y_conf.append(conf.detach().cpu().numpy())
+            timestamps.append(timestamp.numpy())
+            track_ids.append(track_id.numpy())
+            centroids.append(centroid.detach().cpu().numpy())
+
+
+        test_dict = {'preds': np.concatenate(y_pred), 'conf': np.concatenate(y_conf), 'centroids': np.concatenate(centroids), 'timestamps': np.concatenate(timestamps), 'track_ids': np.concatenate(track_ids)}
+
+        data_loader.dataset.add_output = add_output
+        data_loader.dataset.sample_size = orig_sample_size
+
+        return test_dict
+
+    def test_tta_4(self, data_loader, silent=False, df_only=True, n_tta=4):
+
+        self.set_state('eval')
+
+        assert hasattr(data_loader.dataset, 'add_output'), 'data_loader must have addtional timestamp/track_id output'
+        add_output = data_loader.dataset.add_output
+        data_loader.dataset.add_output = True
+
+        # Added to ensure when running for val dataset it uses the whole thing
+        orig_sample_size = data_loader.dataset.sample_size
+        if data_loader.dataset.sample_size < len(data_loader.dataset.ds):
+            print(' '.join(('Setting data_loader sample size from', str(orig_sample_size), 'to', str(len(data_loader.dataset.ds)))))
+            data_loader.dataset.sample_size = len(data_loader.dataset.ds)
+
+
+        transforms = albumentations.Compose([OneOf([MotionBlur(p=0.5), 
+                                                    Blur(p=0.5, blur_limit=3)])])
+
+        y_pred = []
+        y_conf = []
+        timestamps = []
+        track_ids = []
+        centroids = []
+
+        for data in tqdm(data_loader, total=len(data_loader), desc="Test tta prediction"):
+
+            with torch.no_grad():
+
+                x = data[0]
+                pseudo_y = data[1]
+                timestamp = data[2]
+                track_id = data[3]
+
+                out = self.predict_net(x)
+
+                pred_orig, pred_transform, truth_orig, truth_transform, conf, mask, batch_size, n_modes, future_num_frames, centroid = data_transform_to_modes(out, pseudo_y)
+
+                # Shape predictions correctly and take just the first two (target_x, target_y)
+                pred = pred_orig.reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :50, :2]
+
+                for tta in range(n_tta):
+                    
+                    imgs = batch_torch_to_numpy(x[0].clone())
+
+                    aug_img = np.stack([transforms(image=imgs[i])['image'] for i in range(imgs.shape[0])], axis=0)
+                    
+                    _x = [batch_numpy_to_torch(aug_img).to(DEVICE)] + x[1:]
+
+                    out_tta = self.predict_net(_x)
+
+                    pred_tta, _, _, _, conf_tta, _, _, _, _, _ = data_transform_to_modes(out_tta, pseudo_y)
+
+                    pred_tta = pred_tta.reshape(batch_size, n_modes, future_num_frames, -1)[:, :, :50, :2] 
+
+                    pred = pred + pred_tta
+                    conf = conf + conf_tta
+
+                pred = pred / (n_tta + 1)
+                conf = conf / (n_tta + 1)
+
+            y_pred.append(pred.detach().cpu().numpy())
+            y_conf.append(conf.detach().cpu().numpy())
+            timestamps.append(timestamp.numpy())
+            track_ids.append(track_id.numpy())
+            centroids.append(centroid.detach().cpu().numpy())
+
 
         test_dict = {'preds': np.concatenate(y_pred), 'conf': np.concatenate(y_conf), 'centroids': np.concatenate(centroids), 'timestamps': np.concatenate(timestamps), 'track_ids': np.concatenate(track_ids)}
 
@@ -2931,6 +3182,15 @@ def Over9000(params, alpha=0.5, k=6, *args, **kwargs):
     return Lookahead(ralamb, alpha, k)
 
 
+class SkipToEpoch(Callback):
+    def __init__(self, s_epoch): 
+        self.s_epoch = s_epoch
+    def begin_train(self):  
+        if self.epoch < self.s_epoch: raise CancelEpochException
+    def begin_validate(self):  
+        if self.epoch < self.s_epoch: raise CancelValidException
+
+
 def clean_state_dict(state_dict):
     new_state_dict = OrderedDict()
     for k, v in state_dict.items():
@@ -3315,36 +3575,38 @@ def test_agent_dataset(str_loader):
 if __name__ == '__main__':
 
     # If using weight_by_agent_count = 7 this reduces dataset by approx 13%. With 18 datasets, 1600 epochs implies each image seen twice, approx
-    chop_indices = [100]
+    if True:
+        chop_indices = list(range(10, 71, 20)) + list(range(90, 201, 10))
 
-    run_tests_multi_motion_predict(n_epochs=1000, in_size=128, batch_size=256,
-                                   samples_per_epoch=17000 // 10,
-                                   sample_history_num_frames=5, history_num_frames=5, history_step_size=1,
-                                   future_num_frames=50,
-                                   group_scenes=False, weight_by_agent_count=7,
-                                   clsTrainDataset=MultiMotionPredictDataset,
-                                   clsValDataset=MotionPredictDataset,
-                                   clsModel=LyftResnest50,
-                                   fit_fn='fit_fastai_ralamb', val_fn='test_tta_10',
-                                   loss_fn=neg_log_likelihood_transform,
-                                   aug='none',
-                                   loader_fn=double_channel_agents_ego_map_transform,
-                                   cfg_fn=create_config_multi_train_chopped_lite,
-                                   str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
-                                   rasterizer_fn=build_rasterizer)
+        run_tests_multi_motion_predict(n_epochs=4200, in_size=196, batch_size=256,
+                                          samples_per_epoch=17000 // len(chop_indices),
+                                          sample_history_num_frames=5, history_num_frames=5, history_step_size=1,
+                                          future_num_frames=50,
+                                          group_scenes=False, weight_by_agent_count=7,
+                                          clsTrainDataset=MultiMotionPredictDataset,
+                                          clsValDataset=MotionPredictDataset,
+                                          clsModel=LyftResnest50,
+                                          fit_fn='fit_fastai_trainloss', val_fn='test_transform',
+                                          loss_fn=neg_log_likelihood_transform,
+                                          aug='none',
+                                          loader_fn=double_channel_agents_ego_map_transform,
+                                          cfg_fn=create_config_multi_chopped_lite_val10,
+                                          str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
+                                          rasterizer_fn=build_rasterizer)
 
-    run_forecast_multi_motion_predict(n_epochs=1000, in_size=128, batch_size=256,
-                                      samples_per_epoch=17000 // 10,
-                                      sample_history_num_frames=5, history_num_frames=5, history_step_size=1,
-                                      future_num_frames=50,
-                                      group_scenes=False, weight_by_agent_count=7,
-                                      clsTrainDataset=MultiMotionPredictDataset,
-                                      clsValDataset=MotionPredictDataset,
-                                      clsModel=LyftResnest50,
-                                      fit_fn='fit_fastai_ralamb', val_fn='test_tta_10',
-                                      loss_fn=neg_log_likelihood_transform,
-                                      aug='none',
-                                      loader_fn=double_channel_agents_ego_map_transform,
-                                      cfg_fn=create_config_multi_train_chopped_lite,
-                                      str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
-                                      rasterizer_fn=build_rasterizer)
+        run_forecast_multi_motion_predict(n_epochs=4200, in_size=196, batch_size=256,
+                                          samples_per_epoch=17000 // len(chop_indices),
+                                          sample_history_num_frames=5, history_num_frames=5, history_step_size=1,
+                                          future_num_frames=50,
+                                          group_scenes=False, weight_by_agent_count=7,
+                                          clsTrainDataset=MultiMotionPredictDataset,
+                                          clsValDataset=MotionPredictDataset,
+                                          clsModel=LyftResnest50,
+                                          fit_fn='fit_fastai_trainloss', val_fn='test_transform',
+                                          loss_fn=neg_log_likelihood_transform,
+                                          aug='none',
+                                          loader_fn=double_channel_agents_ego_map_transform,
+                                          cfg_fn=create_config_multi_chopped_lite_val10,
+                                          str_train_loaders=['train_data_loader_' + str(i) for i in chop_indices],
+                                          rasterizer_fn=build_rasterizer)
+

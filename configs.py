@@ -805,13 +805,13 @@ def create_config_multi_chopped_lite_future100(str_network='', cfg_model_params=
         },
 
         'val_data_loader': {
-            'key': 'scenes/validate_chopped_100_lite_10_100/validate.zarr',
-            'gt_path': os.path.join(BASE_DIR, 'scenes/validate_chopped_100_lite_10_100/gt.csv'),
-            'mask_path': os.path.join(BASE_DIR, 'scenes/validate_chopped_100_lite_10_100/mask.npz'),
+            'key': 'scenes/validate_chopped_100_lite_100_100/validate.zarr',
+            'gt_path': os.path.join(BASE_DIR, 'scenes/validate_chopped_100_lite_100_100/gt.csv'),
+            'mask_path': os.path.join(BASE_DIR, 'scenes/validate_chopped_100_lite_100_100/mask.npz'),
             'batch_size': batch_size,
             'shuffle': False,
             'num_workers': num_workers,
-            'samples_per_epoch': 10000
+            'samples_per_epoch': 10
         },
 
     }

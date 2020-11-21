@@ -78,7 +78,44 @@ def conf_weighted_nll(coefs, gt, avails, preds, confs):
     return numpy_neg_multi_log_likelihood(gt, p, c, avails)
 
 
+def generate_distance_indicator(preds, confs, threshold=20):
+
+    max_pred_distance = np.mean(np.sqrt(np.square(preds[:, :, -1, -1, :])), axis=(0, 2))
+    long_dist = np.logical_and(max_pred_distance > threshold, np.mean(confs[:, :, -1], axis=0) > 0.1)
+
+    return long_dist
+
+
+def dist_weighted_nll(coefs, gt, avails, preds, confs):
+
+    p, c = calc_weighted_ensemble(preds, confs, coefs)
+
+    return numpy_neg_multi_log_likelihood(gt, p, c, avails)
+
+
 def calc_weighted_ensemble(preds, confs, alpha_weights):
+
+    n = len(alpha_weights) // 2
+
+    if len(alpha_weights) - 1 > preds.shape[0]:
+        long_dist = generate_distance_indicator(preds, confs)
+        indicators = [long_dist, np.logical_not(long_dist)]
+        w = [alpha_weights[:n], alpha_weights[n:]]
+    else:
+        indicators = [np.ones((preds.shape[1],), dtype=np.bool)]
+        w = [alpha_weights]
+
+    p = np.zeros_like(preds[0])
+    c = np.zeros_like(confs[0])
+
+    for _w, ind in zip(w, indicators):
+
+        p[ind], c[ind] = calc_weighted_ensemble_internal(preds[:, ind], confs[:, ind], _w)
+
+    return p, c
+
+
+def calc_weighted_ensemble_internal(preds, confs, alpha_weights):
 
     alpha = alpha_weights[0]
     weights = alpha_weights[1:]
@@ -103,14 +140,16 @@ def calc_weighted_ensemble(preds, confs, alpha_weights):
     return pw, cw
     
 
-def opt_partial(gt, avails, preds, confs, init_coefs=None, opt_fn=conf_weighted_nll):
+def opt_partial(opt_fn, gt, avails, preds, confs, init_coefs=None):
 
     if init_coefs is None:
         # No conf impact and equal weights
-        init_coefs = [0] + [1] * preds.shape[0]
+        init_coefs = np.array([0] + [1] * preds.shape[0])
+        if opt_fn == dist_weighted_nll:
+            init_coefs = np.concatenate([init_coefs, init_coefs])
 
     loss_partial = partial(opt_fn, gt=gt, avails=avails, preds=preds, confs=confs)
-    coef = sp.optimize.minimize(loss_partial, np.array(init_coefs), tol=1e-10)
+    coef = sp.optimize.minimize(loss_partial, init_coefs, bounds=[(0, 1) for i in range(len(init_coefs))], tol=1e-10)
 
     return coef.x, coef.fun
 
@@ -199,7 +238,7 @@ def generate_subs(sub_paths):
     return subs
 
 
-def estimate_ensemble(sub_paths, gt_path):
+def estimate_ensemble(sub_paths, gt_path, opt_fn):
 
     subs = generate_subs(sub_paths)
 
@@ -216,7 +255,7 @@ def estimate_ensemble(sub_paths, gt_path):
     orig_nlls = [numpy_neg_multi_log_likelihood(y['truth'], predictions['preds'][i], predictions['confs'][i], y['avails']) for i in range(n)]
     avg_nll = numpy_neg_multi_log_likelihood(y['truth'], base_p['preds'], base_p['confs'], y['avails'])
 
-    weights, opt_nll = opt_partial(y['truth'], y['avails'], predictions['preds'], predictions['confs'])
+    weights, opt_nll = opt_partial(opt_fn, y['truth'], y['avails'], predictions['preds'], predictions['confs'])
 
     print('*********************************************************************************')
     print(' : '.join(('weights', 'opt nll', 'avg nll', 'orig_nlls')))
@@ -244,11 +283,11 @@ def generate_subs_from_val(val_path):
     return val_sub_path
 
 
-def estimate_validation_weights(val_paths, gt_path=os.path.join(BASE_DIR, 'scenes/validate_chopped_100','gt.csv')):
+def estimate_validation_weights(val_paths, gt_path=os.path.join(BASE_DIR, 'scenes/validate_chopped_100','gt.csv'), opt_fn=conf_weighted_nll):
 
     val_sub_paths = [generate_subs_from_val(val_path) for val_path in val_paths]
 
-    return estimate_ensemble(val_sub_paths, gt_path)
+    return estimate_ensemble(val_sub_paths, gt_path, opt_fn)
 
 
 def generate_ensemble_submission(submission_paths, weights):
@@ -285,31 +324,20 @@ def generate_ensemble_prediction(submission_paths, weights=None):
 
 if __name__ == '__main__':
 
-    gt_path = os.path.join(BASE_DIR, 'scenes/validate_chopped_150_lite_100_50', 'gt.csv')
+    gt_path = os.path.join(BASE_DIR, 'scenes/validate_chopped_100', 'gt.csv')
+
+    val_paths = [os.path.join(DATA_DIR,'val_test_transform_LyftResnest50_double_channel_agents_ego_map_transform_create_config_multi_chopped_lite_val10_neg_log_likelihood_transform_128_2800_256_1062_1_5_50_3_False_7_resnet18_fit_fastai_trainloss_none__.pkl'),
+                 os.path.join(DATA_DIR, 'params_v17.chopped.1600_20chops_last_valid100.csv'),
+                 os.path.join(DATA_DIR, 'params_v17.chopped.2240_20chops_last_valid100.csv'),
+                 os.path.join(DATA_DIR, 'params_v17.chopped.1960_20chops_296_last_valid100.csv')]
+
     
-    val_paths = [os.path.join(DATA_DIR, 'params_v17.chopped.1600_20chops_last_valid150.csv'),
-                 os.path.join(DATA_DIR, 'params_v17.chopped.2240_20chops_last_valid150.csv'),
-                 os.path.join(DATA_DIR, 'params_v17.chopped.1960_20chops_296_last_valid150.csv')]
+    weights, nll = estimate_validation_weights(val_paths, gt_path, opt_fn=conf_weighted_nll)
 
-    weights, nll = estimate_validation_weights(val_paths, gt_path)
-
-    sub_paths = [os.path.join(SUBMISSIONS_DIR, 'submission_rp_1261.csv'),
+    sub_paths = [os.path.join(SUBMISSIONS_DIR,'test_test_transform_LyftResnest50_double_channel_agents_ego_map_transform_create_config_multi_chopped_lite_val10_neg_log_likelihood_transform_128_2800_256_1062_1_5_50_3_False_7_resnet18_fit_fastai_trainloss_none__.csv'),
+                 os.path.join(SUBMISSIONS_DIR, 'submission_rp_1261.csv'),
                  os.path.join(SUBMISSIONS_DIR, 'submission_rp_1230.csv'),
                  os.path.join(SUBMISSIONS_DIR, 'submission_rp_12496.csv')]
-
-    generate_ensemble_submission(sub_paths, weights)
-
-    gt_path = os.path.join(BASE_DIR, 'scenes/validate_chopped_50_lite_100_50','gt.csv')
-
-    val_paths = [os.path.join(DATA_DIR, 'params_v17.chopped.1600_20chops_last_valid50.csv'),
-                os.path.join(DATA_DIR, 'params_v17.chopped.2240_20chops_last_valid50.csv'),
-                os.path.join(DATA_DIR, 'params_v17.chopped.1960_20chops_296_last_valid50.csv')]
-    
-    weights, nll = estimate_validation_weights(val_paths, gt_path)
-
-    sub_paths = [os.path.join(SUBMISSIONS_DIR, 'submission_rp_1261.csv'),
-                os.path.join(SUBMISSIONS_DIR, 'submission_rp_1230.csv'),
-                os.path.join(SUBMISSIONS_DIR, 'submission_rp_12496.csv')]
 
     generate_ensemble_submission(sub_paths, weights)
 
