@@ -2812,7 +2812,7 @@ class Network(object):
 
     def save_state(self):
         torch.save(self.net.state_dict(), self.model_checkpoint_path)
-        torch.save(self.optimizer.state_dict(), self.optimizer_checkpoint_path)
+        #torch.save(self.optimizer.state_dict(), self.optimizer_checkpoint_path)
 
 
 class LyftResnet18Small(nn.Module):

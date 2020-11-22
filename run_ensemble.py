@@ -78,10 +78,10 @@ def conf_weighted_nll(coefs, gt, avails, preds, confs):
     return numpy_neg_multi_log_likelihood(gt, p, c, avails)
 
 
-def generate_distance_indicator(preds, confs, threshold=20):
+def generate_distance_indicator(preds, confs, distance_thresh=20, conf_thresh=0.1):
 
-    max_pred_distance = np.mean(np.sqrt(np.square(preds[:, :, -1, -1, :])), axis=(0, 2))
-    long_dist = np.logical_and(max_pred_distance > threshold, np.mean(confs[:, :, -1], axis=0) > 0.1)
+    mean_pred_distance = np.mean(np.sqrt(np.sum(np.square(preds[:, :, -1, -1, :]), axis=-1)), axis=0)
+    long_dist = np.logical_and(mean_pred_distance > distance_thresh, np.mean(confs[:, :, -1], axis=0) > conf_thresh)
 
     return long_dist
 
@@ -95,12 +95,11 @@ def dist_weighted_nll(coefs, gt, avails, preds, confs):
 
 def calc_weighted_ensemble(preds, confs, alpha_weights):
 
-    n = len(alpha_weights) // 2
-
     if len(alpha_weights) - 1 > preds.shape[0]:
-        long_dist = generate_distance_indicator(preds, confs)
-        indicators = [long_dist, np.logical_not(long_dist)]
-        w = [alpha_weights[:n], alpha_weights[n:]]
+        dist_ind = generate_distance_indicator(preds, confs, distance_thresh=alpha_weights[0], conf_thresh=alpha_weights[1])
+        indicators = [dist_ind==i for i in [True, False]]
+        n = (len(alpha_weights) - 3)//2
+        w = [alpha_weights[2:n+3], alpha_weights[n+3:]]
     else:
         indicators = [np.ones((preds.shape[1],), dtype=np.bool)]
         w = [alpha_weights]
@@ -128,7 +127,7 @@ def calc_weighted_ensemble_internal(preds, confs, alpha_weights):
     weights = np.array(weights) / np.sum(weights)
     w = np.multiply(np.ones((n, n_samples, n_modes)), weights.reshape(-1, 1, 1))
 
-    w = np.multiply(w, confs)
+    w = np.multiply(w, c)
 
     pw = np.multiply(preds, w[:, :, :, None, None])
     pw = np.divide(np.sum(pw, axis=0), np.sum(w, axis=0)[:, :, None, None])
@@ -138,18 +137,21 @@ def calc_weighted_ensemble_internal(preds, confs, alpha_weights):
     cw = np.divide(cw, np.sum(cw, axis=-1)[:, None])
 
     return pw, cw
-    
+
 
 def opt_partial(opt_fn, gt, avails, preds, confs, init_coefs=None):
 
     if init_coefs is None:
         # No conf impact and equal weights
         init_coefs = np.array([0] + [1] * preds.shape[0])
+        bounds = [(0, 1) for i in range(len(init_coefs))]
+
         if opt_fn == dist_weighted_nll:
-            init_coefs = np.concatenate([init_coefs, init_coefs])
+            init_coefs = np.concatenate([np.array([20, 0.1]), init_coefs, init_coefs])
+            bounds = [(0, 50), (0, 1)] + bounds.copy() + bounds.copy()
 
     loss_partial = partial(opt_fn, gt=gt, avails=avails, preds=preds, confs=confs)
-    coef = sp.optimize.minimize(loss_partial, init_coefs, bounds=[(0, 1) for i in range(len(init_coefs))], tol=1e-10)
+    coef = sp.optimize.minimize(loss_partial, init_coefs, bounds=bounds, tol=1e-10, options={'disp': True})
 
     return coef.x, coef.fun
 
@@ -330,7 +332,7 @@ if __name__ == '__main__':
                  os.path.join(DATA_DIR, 'params_v17.chopped.1600_20chops_last_valid100.csv'),
                  os.path.join(DATA_DIR, 'params_v17.chopped.2240_20chops_last_valid100.csv'),
                  os.path.join(DATA_DIR, 'params_v17.chopped.1960_20chops_296_last_valid100.csv'),
-                 os.path.join(DATA_DIR, 'params_v17.chopped.4000_20chops_last_valid100.csv')]
+                 os.path.join(DATA_DIR, 'params_v19.satellite_last_valid100.csv')]
 
     
     weights, nll = estimate_validation_weights(val_paths, gt_path, opt_fn=dist_weighted_nll)
