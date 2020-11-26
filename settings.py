@@ -26,11 +26,7 @@ torch.backends.cudnn.benchmark = False
 # DIRECTORIES
 ######################################
 
-if os.uname()[1] == 'ciara-MS-7883':
-    BASE_DIR = '/home/ciara/Documents/Kaggle/lyft-motion-prediction-autonomous-vehicles'
-else:
-    BASE_DIR = '/media/user/3a0db8e5-2fba-4de7-be88-04c227b14704/lyft-motion-prediction-autonomous-vehicles'
-
+BASE_DIR = '/path/to/lyft-motion-prediction-autonomous-vehicles'
 
 DATA_DIR = os.path.join(BASE_DIR, 'data')
 CACHE_DIR = os.path.join(BASE_DIR, 'cache')
@@ -42,6 +38,9 @@ MULTI_MODE_SUBMISSION = os.path.join(BASE_DIR, 'multi_mode_sample_submission.csv
 
 # set env variable for data
 os.environ["L5KIT_DATA_FOLDER"] = BASE_DIR
+
+# Set number of threads
+NUM_WORKERS = 10
 
 
 if __name__ == '__main__':

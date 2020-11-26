@@ -298,6 +298,46 @@ def estimate_ensemble(sub_paths, gt_path, opt_fn):
     return weights, opt_nll
 
 
+def calc_weighted_trajectories(preds, confs, weights):
+
+    n, n_samples, n_modes = preds.shape[:3]
+
+    weights = np.array(weights) / np.sum(weights)
+    w = np.multiply(np.ones((n, n_samples, n_modes)), weights.reshape(-1, 1, 1))
+
+    pw = np.multiply(preds, w[:, :, :, None, None])
+    pw = np.divide(np.sum(pw, axis=0), np.sum(w, axis=0)[:, :, None, None])
+
+    cw = np.multiply(confs, w)
+    cw = np.divide(np.sum(cw, axis=0), np.sum(w, axis=0))
+    cw = np.divide(cw, np.sum(cw, axis=-1)[:, None])
+
+    return pw, cw
+
+
+def calc_simple_ensemble(sub_paths, gt_path, weights):
+
+    y, predictions, avg_nll, orig_nlls = assess_subs(sub_paths, gt_path)
+
+    pw, cw = calc_weighted_trajectories(predictions['preds'], predictions['confs'], weights)
+
+    opt_nll = numpy_neg_multi_log_likelihood(y['truth'], pw, cw, y['avails'])
+
+    print('*********************************************************************************')
+    print(' : '.join(('weights', 'opt nll', 'avg nll', 'orig_nlls')))
+    print(' : '.join((str(weights), str(opt_nll), str(avg_nll), str(orig_nlls))))
+    print('*********************************************************************************')
+
+    return weights, opt_nll
+
+
+def generate_performance(val_paths, gt_path, weights):
+
+    val_sub_paths = [generate_subs_from_val(val_path) for val_path in val_paths]
+
+    return calc_simple_ensemble(val_sub_paths, gt_path, weights)
+
+
 def estimate_validation_weights(val_paths, gt_path=os.path.join(BASE_DIR, 'scenes/validate_chopped_100','gt.csv'), opt_fn=conf_weighted_nll):
 
     val_sub_paths = [generate_subs_from_val(val_path) for val_path in val_paths]
@@ -339,19 +379,21 @@ def generate_ensemble_prediction(submission_paths, weights=None):
 
 if __name__ == '__main__':
 
+
+    #########################
+    ####### VALID 100 #######
+    #########################
+
     gt_path = os.path.join(BASE_DIR, 'scenes/validate_chopped_100', 'gt.csv')
 
-    val_paths = [os.path.join(DATA_DIR, 'val_test_transform_LyftResnest50_double_channel_agents_ego_map_transform_create_config_multi_chopped_lite_val10_neg_log_likelihood_transform_128_2800_256_1062_1_5_50_3_False_7_resnet18_fit_fastai_trainloss_none__.pkl'),
-                 os.path.join(DATA_DIR, 'val_test_transform_LyftResnest50_double_channel_agents_ego_map_transform_create_config_multi_chopped_lite_val10_neg_log_likelihood_transform_196_4200_256_1062_1_5_50_3_False_7_resnet18_fit_fastai_trainloss_none_3671_.pkl'),
-                 os.path.join(DATA_DIR, 'val_test_transform_LyftResnest50_double_channel_agents_ego_map_transform_create_config_multi_chopped_lite_val10_neg_log_likelihood_transform_196_4200_256_1062_1_5_50_3_False_7_resnet18_fit_fastai_trainloss_none_3066_.pkl'),
-                 os.path.join(DATA_DIR, 'params_v19.satellite_last_valid100.csv')]
+    val_paths = [os.path.join(DATA_DIR,
+                              'val_test_transform_LyftResnest50_double_channel_agents_ego_map_transform_create_config_multi_chopped_lite_val10_neg_log_likelihood_transform_196_4200_256_1062_1_5_50_3_False_7_resnet18_fit_fastai_trainloss_none__.pkl'),
+                 os.path.join(DATA_DIR, 'params_v20.satellite_last_valid100.csv')]
 
-    
     weights, nll = estimate_validation_weights(val_paths, gt_path, opt_fn=dist_weighted_nll)
 
-    sub_paths = [os.path.join(SUBMISSIONS_DIR,'test_test_transform_LyftResnest50_double_channel_agents_ego_map_transform_create_config_multi_chopped_lite_val10_neg_log_likelihood_transform_128_2800_256_1062_1_5_50_3_False_7_resnet18_fit_fastai_trainloss_none__.csv'),
-                 os.path.join(SUBMISSIONS_DIR, 'submission_rp_1159.csv')]
+    sub_paths = [os.path.join(SUBMISSIONS_DIR,
+                              'test_test_transform_LyftResnest50_double_channel_agents_ego_map_transform_create_config_multi_chopped_lite_val10_neg_log_likelihood_transform_196_4200_256_1062_1_5_50_3_False_7_resnet18_fit_fastai_trainloss_none__.csv'),
+                 os.path.join(SUBMISSIONS_DIR, 'params_v20.satellite_last_test.csv')]
 
     generate_ensemble_submission(sub_paths, weights)
-
-

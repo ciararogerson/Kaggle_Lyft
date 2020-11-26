@@ -42,8 +42,8 @@ from l5kit.visualization import PREDICTED_POINTS_COLOR, TARGET_POINTS_COLOR, dra
 from concurrent.futures import ThreadPoolExecutor
 
 from utils import *
-from settings import BASE_DIR, DATA_DIR, CACHE_DIR, MODEL_DIR
-from configs import create_prep_config, create_prep_config_future100
+from settings import BASE_DIR, DATA_DIR, CACHE_DIR, MODEL_DIR, NUM_WORKERS
+from configs import create_prep_config
 
 
 
@@ -51,7 +51,6 @@ from configs import create_prep_config, create_prep_config_future100
 # SET UP / GLOBALS
 ######################################
 
-NUM_WORKERS = 16
 MIN_FUTURE_STEPS = 10
 
 
@@ -221,55 +220,6 @@ def zarr_scenes_chop_lite(input_zarr: str, output_zarr: str, num_frames_to_copy:
     return chopped_indices
 
 
-def create_tl_dataset(zarr_path: str, dataset_path: str) -> None:
-    """
-    Create a traffic light dataset
-    """
-
-    zarr_path = Path(zarr_path)
-    input_dataset = ChunkedDataset(str(zarr_path))
-    input_dataset.open()
-
-    timestamps = []
-    scene_ids = []
-    traffic_light_face_ids = []
-
-    for idx in tqdm(range(len(input_dataset.scenes)), desc="copying"):
-
-        scene = input_dataset.scenes[idx]
-        scene_id = str(scene['start_time']) + str(scene['host']) 
-        
-        first_frame_idx = scene["frame_index_interval"][0]
-        last_frame_idx = scene["frame_index_interval"][-1]
-
-        frames = input_dataset.frames[first_frame_idx:last_frame_idx]
-
-        for frame in frames:
-
-            tl_faces = input_dataset.tl_faces[get_tl_faces_slice_from_frames(frame)]
-            active_tls = filter_tl_faces_by_status(tl_faces, "ACTIVE")
-
-            if len(active_tls) > 0:
-
-                _traffic_light_face_ids = np.concatenate([active_tls['traffic_light_id'].reshape(-1, 1), active_tls['face_id'].reshape(-1, 1)], axis=1)
-                _traffic_light_face_ids = np.unique(_traffic_light_face_ids, axis=0)
-
-                traffic_light_face_ids.append(_traffic_light_face_ids)
-                
-                timestamps.append(np.array([frame['timestamp']] * _traffic_light_face_ids.shape[0]).reshape(-1, 1))
-                scene_ids.append(np.array([scene_id] * _traffic_light_face_ids.shape[0]).reshape(-1, 1))
-
-    tl_dict = {'scene_ids': np.concatenate(scene_ids), 
-                'timestamps': np.concatenate(timestamps), 
-                'traffic_light_face_ids': np.concatenate(traffic_light_face_ids)
-    }
-    
-    # Store 
-    save_as_pickle(dataset_path, tl_dict)
-
-
-
-
 ######################################
 # DATA PREP
 ######################################
@@ -290,13 +240,6 @@ def save_multi_datasets(config = create_prep_config(), str_data_loader='train_da
             e.submit(save_chopped_ds_lite, config, str_data_loader, n, history_num_frames)
 
 
-def save_traffic_light_dataset(config=create_prep_config(), str_data_loader='train_data_loader'):
-
-    dm = LocalDataManager(None)
-    create_tl_dataset(dm.require(config[str_data_loader]["key"]), os.path.join(DATA_DIR, str_data_loader + 'traffic_lights.pkl'))
-
-
-
 if __name__ == '__main__':
 
     """
@@ -307,9 +250,17 @@ if __name__ == '__main__':
     """
 
 
-    chop_indices = list(range(15, 200, 10))
+    chop_indices = list(range(10, 201, 10))
 
     for str_loader in ['train_data_loader']:
         for n in chop_indices:
             print(' : '.join((str_loader, str(n))))
-            save_multi_datasets(config=create_prep_config(), str_data_loader=str_loader, num_frames_to_chop=[n] if not isinstance(n, list) else n, history_num_frames=100)
+            save_multi_datasets(config=create_prep_config(), str_data_loader=str_loader, num_frames_to_chop=[n] if not isinstance(n, list) else n, history_num_frames=10)
+
+
+    chop_indices = [100]
+
+    for str_loader in ['val_data_loader']:
+        for n in chop_indices:
+            print(' : '.join((str_loader, str(n))))
+            save_multi_datasets(config=create_prep_config(), str_data_loader=str_loader, num_frames_to_chop=[n] if not isinstance(n, list) else n, history_num_frames=10)
