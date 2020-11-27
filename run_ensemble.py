@@ -331,7 +331,7 @@ def calc_simple_ensemble(sub_paths, gt_path, weights):
     return weights, opt_nll
 
 
-def generate_performance(val_paths, gt_path, weights):
+def generate_manual_weights_performance(val_paths, gt_path, weights):
 
     val_sub_paths = [generate_subs_from_val(val_path) for val_path in val_paths]
 

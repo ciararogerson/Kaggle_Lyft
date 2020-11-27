@@ -6,4 +6,6 @@
 
 ``run_train.py`` to run training experiments and create submissions.
 
-``run_ensemble.py`` to estimate ensemble weights and create submissions.
+``run_ensemble.py`` for ensembling logic.
+
+``run_submit.py`` for copy of submission script for Kaggle.
