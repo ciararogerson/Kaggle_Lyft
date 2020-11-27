@@ -2156,6 +2156,9 @@ def run_valset_multi_motion_predict(model_str='', str_network='resnet18',
                                     str_val_loader='val_data_loader',
                                     loader_fn=double_channel_agents_ego_map_transform,
                                     cfg_fn=create_config_multi_train_chopped_lite):
+    """
+    Create prediction output for different validation set specified in str_val_loader
+    """
 
     val_dict_filepath = create_val_dict_filepath(clsTrainDataset, clsValDataset, clsModel, val_fn, rasterizer_fn,
                                                  loader_fn, cfg_fn, fit_fn, loss_fn, in_size, pixel_size, ego_center,

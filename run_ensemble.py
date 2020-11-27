@@ -380,20 +380,12 @@ def generate_ensemble_prediction(submission_paths, weights=None):
 if __name__ == '__main__':
 
 
-    #########################
-    ####### VALID 100 #######
-    #########################
-
     gt_path = os.path.join(BASE_DIR, 'scenes/validate_chopped_100', 'gt.csv')
 
-    val_paths = [os.path.join(DATA_DIR,
-                              'val_test_transform_LyftResnest50_double_channel_agents_ego_map_transform_create_config_multi_chopped_lite_val10_neg_log_likelihood_transform_196_4200_256_1062_1_5_50_3_False_7_resnet18_fit_fastai_trainloss_none__.pkl'),
-                 os.path.join(DATA_DIR, 'params_v20.satellite_last_valid100.csv')]
+    val_paths = ['path/to/validation_submission_1.csv', 'path/to/validation_submission_2.csv', 'path/to/validation_submission_3.csv']
 
     weights, nll = estimate_validation_weights(val_paths, gt_path, opt_fn=dist_weighted_nll)
 
-    sub_paths = [os.path.join(SUBMISSIONS_DIR,
-                              'test_test_transform_LyftResnest50_double_channel_agents_ego_map_transform_create_config_multi_chopped_lite_val10_neg_log_likelihood_transform_196_4200_256_1062_1_5_50_3_False_7_resnet18_fit_fastai_trainloss_none__.csv'),
-                 os.path.join(SUBMISSIONS_DIR, 'params_v20.satellite_last_test.csv')]
+    sub_paths = ['path/to/submission_1.csv', 'path/to/submission_2.csv', 'path/to/submission_3.csv']
 
     generate_ensemble_submission(sub_paths, weights)
