@@ -1,32 +1,18 @@
-
-
 import os
 import numpy as np
 import pandas as pd
 from copy import deepcopy
 
-RUN_LOCAL = False
 
-if RUN_LOCAL:
+READ_DIR                = '/kaggle/input'
+WRITE_DIR               = '/kaggle/working'
+BASE_DIR                = READ_DIR
+DATA_DIR                = os.path.join(BASE_DIR, 'lyft-motion-prediction-subs')
+SUBMISSIONS_DIR         = WRITE_DIR
 
-    BASE_DIR                = '/media/user/3a0db8e5-2fba-4de7-be88-04c227b14704/lyft-motion-prediction-autonomous-vehicles/'
-    SUBMISSIONS_DIR         = os.path.join(BASE_DIR, 'submissions')
-    DATA_DIR                = SUBMISSIONS_DIR
-    SAMPLE_SUBMISSION_PATH  = os.path.join(BASE_DIR, 'multi_mode_sample_submission.csv')
+SAMPLE_SUBMISSION_PATH  = os.path.join(BASE_DIR, 'lyft-motion-prediction-autonomous-vehicles', 'multi_mode_sample_submission.csv')
 
-    SAMPLE_SUBMISSION       = pd.read_csv(SAMPLE_SUBMISSION_PATH)
-
-else:
-
-    READ_DIR                = '/kaggle/input'
-    WRITE_DIR               = '/kaggle/working'
-    BASE_DIR                = READ_DIR
-    DATA_DIR                = os.path.join(BASE_DIR, 'lyft-motion-prediction-subs')
-    SUBMISSIONS_DIR         = WRITE_DIR
-
-    SAMPLE_SUBMISSION_PATH  = os.path.join(BASE_DIR, 'lyft-motion-prediction-autonomous-vehicles', 'multi_mode_sample_submission.csv')
-
-    SAMPLE_SUBMISSION       = pd.read_csv(SAMPLE_SUBMISSION_PATH)
+SAMPLE_SUBMISSION       = pd.read_csv(SAMPLE_SUBMISSION_PATH)
 
         
 def get_column_names():
@@ -47,7 +33,6 @@ all_names = confs + [_c for c in conf_names for _c in c]
 def check_validity(subs):
     return all([np.array_equal(s.timestamp.values, subs[0].timestamp.values) and np.array_equal(s.track_id.values, subs[0].track_id.values) for s in subs[1:]])  
     
-
 
 def clip_sub_confs(sub, clip_min, clip_max):
 
@@ -94,7 +79,6 @@ def sort_sub_by_distances(sub):
     return sub
 
 
-
 def combine_multi_subs_dist_order(subs, weights, logscale=False):
 
     assert len(weights) == len(subs), 'You must have one weight for each sub in sub_list'
@@ -125,8 +109,7 @@ def create_sub_from_multis_dist_order(subs, weights, logscale=False):
     submission = combine_multi_subs_dist_order(subs, weights, logscale)
 
     submission.to_csv(os.path.join(SUBMISSIONS_DIR, 'submission.csv'), index=False, float_format='%.6g')
-    
-    
+
 
 def save_as_sub(sub_path, clip_values=None):
 

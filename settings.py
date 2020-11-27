@@ -33,8 +33,18 @@ CACHE_DIR = os.path.join(BASE_DIR, 'cache')
 MODEL_DIR = os.path.join(BASE_DIR, 'models')
 SUBMISSIONS_DIR = os.path.join(BASE_DIR, 'submissions')
 
+if not os.path.exists(DATA_DIR): os.makedirs(DATA_DIR)
+if not os.path.exists(CACHE_DIR): os.makedirs(CACHE_DIR)
+if not os.path.exists(MODEL_DIR): os.makedirs(MODEL_DIR)
+if not os.path.exists(SUBMISSIONS_DIR): os.makedirs(SUBMISSIONS_DIR)
+
 SINGLE_MODE_SUBMISSION = os.path.join(BASE_DIR, 'single_mode_sample_submission.csv')
 MULTI_MODE_SUBMISSION = os.path.join(BASE_DIR, 'multi_mode_sample_submission.csv')
+
+
+######################################
+# ENVIRONMENT / MISC
+######################################
 
 # set env variable for data
 os.environ["L5KIT_DATA_FOLDER"] = BASE_DIR
