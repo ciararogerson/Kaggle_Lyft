@@ -76,7 +76,6 @@ def create_config(str_network='', cfg_model_params=None, input_size=224, pixel_s
     return cfg
 
 
-
 def create_prep_config(str_network='', cfg_model_params=None, input_size=224, pixel_size=[0.5, 0.5], ego_center=[0.25, 0.5],
                   batch_size=12, num_workers=16, samples_per_epoch=0, sample_history_num_frames=10,
                   history_num_frames=10, future_num_frames=50, n_modes=3,

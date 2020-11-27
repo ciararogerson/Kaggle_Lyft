@@ -2296,7 +2296,9 @@ def run_forecast_multi_motion_predict(model_str='', str_network='resnet18',
 
 if __name__ == '__main__':
 
-
+    """
+    Run model estimation and submission creation
+    """
     chop_indices = list(range(10, 201, 10))
 
     run_tests_multi_motion_predict(n_epochs=1000, in_size=128, batch_size=256,

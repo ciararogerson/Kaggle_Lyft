@@ -249,7 +249,6 @@ if __name__ == '__main__':
     Defaulting to single runs here
     """
 
-
     chop_indices = list(range(10, 201, 10))
 
     for str_loader in ['train_data_loader']:
